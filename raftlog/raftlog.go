@@ -37,16 +37,18 @@ func (r *RaftLog) AppendEntries(prevIndex int, prevTerm int, newEntries []LogEnt
 	// (in the common case of appending to the end of the array,
 	// len(entries) == newIndexStart, and the loop will run zero times)
 	newIndexStart := prevIndex + 1
+	newIndexEnd := prevIndex + len(newEntries) + 1
 	numToCheck := utils.Min(len(newEntries), len(r.entries)-newIndexStart)
 	for i := 0; i < numToCheck; i++ {
 		currentEntry := r.entries[newIndexStart+i]
 		newEntry := newEntries[i]
 		log.Printf("i = %v; currentEntry = %v; newEntry = %v\n", i, currentEntry, newEntry)
-		// note that if the terms differ, the newEntry must be newer. TODO wait no
-		// that's not true though... we could match at the start but our current
-		// entries increment part way through due to a now-fixed partition or
-		// whatever. What do we do if the newEntry has an older term than we
-		// currently have? need to check the formal spec
+		// If the terms differ, we must replace with what we're given. Even if the
+		// one we have has a newer term -- which has to be possible, eg we match at
+		// the start but our current entries increment part-way through due to
+		// getting them from some different leader. But it doesn't matter, it's for
+		// the leader to solve that, not us. Our job is to replicate exactly what
+		// our current leader says. cf raft.tla#L377
 		if currentEntry.term != newEntry.term {
 			log.Printf("Terms compared unequal, truncating entries back to %v", newIndexStart+i)
 			r.entries = r.entries[:newIndexStart+i]
@@ -54,14 +56,17 @@ func (r *RaftLog) AppendEntries(prevIndex int, prevTerm int, newEntries []LogEnt
 		}
 	}
 
-	// 4. Append any new entries not already in the log. Actually for now just
-	// set everything unconditionally; TODO do that optimization
-	for i := 0; i <= len(newEntries); i++ {
-		if i+newIndexStart < len(r.entries) {
-			r.entries[i+newIndexStart] = newEntries[i]
-		} else {
-			r.entries = append(r.entries, newEntries[i])
-		}
+	// If the new entries to be added are entirely within the current entries,
+	// nothing more to do -- the term matches, so we're guaranteed that the
+	// entries will match.
+	if newIndexEnd < len(r.entries) {
+		return true
+	}
+
+	// 4. Append any new entries not already in the log. Can start from the end of current entries
+	firstActuallyNewEntryIndex := len(r.entries) - newIndexStart
+	for i := firstActuallyNewEntryIndex; i < len(newEntries); i++ {
+		r.entries = append(r.entries, newEntries[i])
 	}
 
 	// 5. If leaderCommit > commitIndex, set commitIndex =
