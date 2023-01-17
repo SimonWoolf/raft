@@ -7,21 +7,12 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func makeDummyLog(length int, currentTerm int) *RaftLog {
-	log := RaftLog{}
-	for i := 0; i < length; i++ {
-		log.entries = append(log.entries, LogEntry{
-			term: currentTerm,
-			item: fmt.Sprintf("item %d", i),
-		})
-	}
-	return &log
-}
+type termSpec [2]int
 
 func TestAppendEntriesMissing(t *testing.T) {
 	currentTerm := 3
 	length := 5
-	log := makeDummyLog(length, currentTerm)
+	log := makeSimpleLog(length, currentTerm)
 	newEntries := []LogEntry{LogEntry{term: currentTerm, item: "new item"}}
 
 	// should fail if there's missing entries. NB: it's the index of the _previous_
@@ -34,7 +25,7 @@ func TestAppendEntriesMissing(t *testing.T) {
 func TestAppendEntriesAddingToEnd(t *testing.T) {
 	currentTerm := 3
 	length := 5
-	log := makeDummyLog(length, currentTerm)
+	log := makeSimpleLog(length, currentTerm)
 	newEntries := []LogEntry{LogEntry{term: currentTerm, item: "new item"}}
 
 	// should succeed if pushing right on the end
@@ -46,7 +37,7 @@ func TestAppendEntriesAddingToEnd(t *testing.T) {
 func TestAppendEntriesReplacing(t *testing.T) {
 	currentTerm := 3
 	length := 5
-	log := makeDummyLog(length, currentTerm)
+	log := makeSimpleLog(length, currentTerm)
 	// nb: current+1 to make sure it does actually replace
 	newEntries := []LogEntry{LogEntry{term: currentTerm + 1, item: "new item"}}
 
@@ -59,7 +50,7 @@ func TestAppendEntriesReplacing(t *testing.T) {
 func TestAppendEntriesTermMatch(t *testing.T) {
 	currentTerm := 3
 	length := 5
-	log := makeDummyLog(length, currentTerm)
+	log := makeSimpleLog(length, currentTerm)
 	newEntries := []LogEntry{LogEntry{term: currentTerm, item: "new item"}}
 
 	// should fail if term doesn't match the prevTerm
@@ -69,7 +60,7 @@ func TestAppendEntriesTermMatch(t *testing.T) {
 
 func TestAppendEntriesToEmpty(t *testing.T) {
 	// check the empty-log case (no previous entry) case works
-	log := makeDummyLog(1, 0)
+	log := makeSimpleLog(1, 0)
 	newEntries := []LogEntry{LogEntry{term: 1, item: "new item"}}
 	assert.True(t, log.AppendEntries(-1, -1, newEntries))
 	assert.Equal(t, 1, len(log.entries))
@@ -79,7 +70,7 @@ func TestEntryConflict(t *testing.T) {
 	length := 5
 	oldTerm := 3
 	newTerm := 4
-	log := makeDummyLog(length, oldTerm)
+	log := makeSimpleLog(length, oldTerm)
 	newEntries := []LogEntry{LogEntry{term: newTerm, item: "new item"}}
 
 	// Let's say we want the last three entries to conflict, due to increased
@@ -89,4 +80,54 @@ func TestEntryConflict(t *testing.T) {
 	assert.Equal(t, "item 1", log.entries[1].item) // 1 is unchanged
 	assert.Equal(t, newEntries[0], log.entries[2]) // 2 is replaced
 	assert.Equal(t, 3, len(log.entries))           // 4 and 5 are gone
+}
+
+// Construct the set of logs described by fig 7 of the raft paper, do the same
+// operation to each, and check the outcome
+func TestFigSeven(t *testing.T) {
+	logs := []*RaftLog{
+		makeLogToSpec([]termSpec{{1, 3}, {4, 2}, {5, 2}, {6, 2}}),
+		makeLogToSpec([]termSpec{{1, 3}, {4, 1}}),
+		makeLogToSpec([]termSpec{{1, 3}, {4, 2}, {5, 2}, {6, 4}}),
+		makeLogToSpec([]termSpec{{1, 3}, {4, 2}, {5, 2}, {6, 3}, {7, 2}}),
+		makeLogToSpec([]termSpec{{1, 3}, {4, 4}}),
+		makeLogToSpec([]termSpec{{1, 3}, {2, 3}, {3, 5}}),
+	}
+
+	newEntries := []LogEntry{LogEntry{term: 8, item: "x"}}
+
+	// (a) False. Missing entry at index 10.
+	assert.False(t, logs[0].AppendEntries(9, 6, newEntries))
+	// ((b) False. Many missing entries.
+	assert.False(t, logs[1].AppendEntries(9, 6, newEntries))
+	// ((c) True. Entry already in position 10 is replaced.
+	assert.True(t, logs[2].AppendEntries(9, 6, newEntries))
+	// ((d) True. Entries at position 10,11 are replaced.
+	assert.True(t, logs[3].AppendEntries(9, 6, newEntries))
+	// ((e) False. Missing entries.
+	assert.False(t, logs[4].AppendEntries(9, 6, newEntries))
+	// ((f) False. Previous term mismatch.
+	assert.False(t, logs[5].AppendEntries(9, 6, newEntries))
+}
+
+func makeSimpleLog(length int, currentTerm int) *RaftLog {
+	return addEntries(&RaftLog{}, []termSpec{{currentTerm, length}})
+}
+
+func makeLogToSpec(spec []termSpec) *RaftLog {
+	return addEntries(&RaftLog{}, spec)
+}
+
+// for constructing mock logs to a particular spec
+func addEntries(log *RaftLog, spec []termSpec) *RaftLog {
+	for _, v := range spec {
+		term, numInTerm := v[0], v[1]
+		for i := 0; i < numInTerm; i++ {
+			log.entries = append(log.entries, LogEntry{
+				term: term,
+				item: fmt.Sprintf("item %d", i),
+			})
+		}
+	}
+	return log
 }
