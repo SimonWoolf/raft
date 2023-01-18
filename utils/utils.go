@@ -1,6 +1,10 @@
 package utils
 
-import "golang.org/x/exp/constraints"
+import (
+	"log"
+
+	"golang.org/x/exp/constraints"
+)
 
 // can't believe this shit isn't all in the standard library
 
@@ -33,6 +37,29 @@ func Filter[T any](slice []T, f func(T) bool) []T {
 		if f(v) {
 			res = append(res, v)
 		}
+	}
+	return res
+}
+
+func Find[T any](slice []T, f func(T) bool) *T {
+	for _, v := range slice {
+		if f(v) {
+			return &v
+		}
+	}
+	return nil
+}
+
+// NR == No Result
+func MustSucceedNR(err error) {
+	if err != nil {
+		log.Fatalf("Unhandled error: %v", err)
+	}
+}
+
+func MustSucceed[T any](res T, err error) T {
+	if err != nil {
+		log.Fatalf("Unhandled error: %v", err)
 	}
 	return res
 }

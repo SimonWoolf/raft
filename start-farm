@@ -1,0 +1,19 @@
+#!/bin/bash
+
+trap 'kill 0' SIGINT;
+
+# Read the farm config from conf.go. Bit hacky, but it's a one-off
+# project, don't need to overengineer the config
+regexp="NodeId: ([0-9]*)"
+while read line; do
+  if [[ $line =~ $regexp ]]
+  then
+    nodeId="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+    echo "starting nodeId = ${nodeId}"
+    x-terminal-emulator -e go run cmd/node/main.go --nodeId ${nodeId} >> /tmp/aa &
+  fi
+done < "./conf/conf.go"
+
+echo "ctrl-c to close the farm"
+wait

@@ -56,7 +56,7 @@ func setUpEmptyLeader(t *testing.T) *RaftState {
 
 func mockResponses(r *RaftState, prevIndex Index, numFailures int, numSuccesses int) {
 	for {
-		msg := (<-r.broadcastChan).ProtoReflect()
+		msg := (<-r.BroadcastChan).ProtoReflect()
 		method := msg.Descriptor().Name()
 		log.Printf("Got message on broadcast channel; method = %v", method)
 		switch method {

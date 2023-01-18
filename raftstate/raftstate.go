@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft/raftlog"
 	"raft/raftrpc"
+	"raft/utils"
 
 	"github.com/qmuntal/stateless"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -51,7 +52,7 @@ type RaftState struct {
 	statem            *stateless.StateMachine
 	currentTerm       Term
 	pendingClientReqs map[Index]PendingClientReq // indexed by prevIndex
-	broadcastChan     chan ProtobufMessage
+	BroadcastChan     chan ProtobufMessage
 }
 
 func NewRaftState(broadcastChan chan ProtobufMessage) *RaftState {
@@ -74,7 +75,7 @@ func NewRaftState(broadcastChan chan ProtobufMessage) *RaftState {
 		statem:            statem,
 		currentTerm:       1,
 		pendingClientReqs: make(map[Index]PendingClientReq),
-		broadcastChan:     broadcastChan,
+		BroadcastChan:     broadcastChan,
 	}
 }
 
@@ -83,10 +84,7 @@ func NewRaftState(broadcastChan chan ProtobufMessage) *RaftState {
 // append_entries() to add it to its own log. This is how new log entries get
 // added to a Raft cluster.
 func (r *RaftState) HandleClientLogAppend(item string) (bool, error) {
-	currentState, err := r.statem.State(context.Background())
-	if err != nil {
-		panic(err)
-	}
+	currentState := utils.MustSucceed(r.statem.State(context.Background()))
 	if currentState != stateLeader {
 		return false, errors.New("Only the leader can handle client requests")
 	}
@@ -111,14 +109,14 @@ func (r *RaftState) HandleClientLogAppend(item string) (bool, error) {
 		Responses:     &[clusterSize]*bool{},
 	}
 
-	r.broadcastChan <- &raftrpc.AppendEntriesRequest{
+	r.BroadcastChan <- &raftrpc.AppendEntriesRequest{
 		Term:      Term(r.currentTerm),
 		PrevIndex: prevIndex,
 		PrevTerm:  prevTerm,
 		Entries:   []*raftrpc.LogEntry{entry},
 	}
 
-	err = <-resultChan
+	err := <-resultChan
 	return err == nil, err
 }
 
@@ -128,10 +126,7 @@ func (r *RaftState) HandleClientLogAppend(item string) (bool, error) {
 // operation and responds with an AppendEntriesResponse message to indicate
 // success or failure.
 func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) bool {
-	currentState, err := r.statem.State(context.Background())
-	if err != nil {
-		panic(err)
-	}
+	currentState := utils.MustSucceed(r.statem.State(context.Background()))
 	if currentState != stateFollower {
 		log.Printf("Received append entries req from leader %d, but unable to handle as in state %v", req.NodeId, currentState)
 		return false
@@ -176,6 +171,15 @@ func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, n
 	} else if numReplies >= clusterSize {
 		pendingReq.ResultChannel <- errors.New("Unsuccessful result from a majority of nodes")
 		delete(r.pendingClientReqs, prevIndex)
+	}
+}
+
+// Temp, remove once we have actual stuff working
+func (r *RaftState) BecomeLeader() {
+	currentState := utils.MustSucceed(r.statem.State(context.Background()))
+	if currentState == stateFollower {
+		r.statem.Fire(triggerElection)
+		r.statem.Fire(winElection)
 	}
 }
 
