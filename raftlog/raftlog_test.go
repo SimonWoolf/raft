@@ -18,7 +18,7 @@ func TestAppendEntriesMissing(t *testing.T) {
 	// should fail if there's missing entries. NB: it's the index of the _previous_
 	// entry, and we're zero-indexing, so the 'equal to length' case should fail,
 	// there should not already be an entry at that position
-	assert.False(t, log.AppendEntries(int32(length), int32(currentTerm), newEntries))
+	assert.False(t, log.AppendEntries(Index(length), Term(currentTerm), newEntries))
 	assert.Equal(t, 5, len(log.Entries))
 }
 
@@ -29,7 +29,7 @@ func TestAppendEntriesAddingToEnd(t *testing.T) {
 	newEntries := []LogEntry{MakeLogEntry(currentTerm, "new item")}
 
 	// should succeed if pushing right on the end
-	assert.True(t, log.AppendEntries(int32(length-1), int32(currentTerm), newEntries))
+	assert.True(t, log.AppendEntries(Index(length-1), Term(currentTerm), newEntries))
 	assert.Equal(t, 6, len(log.Entries))
 	assert.Equal(t, "new item", log.Entries[5].Item)
 }
@@ -42,7 +42,7 @@ func TestAppendEntriesReplacing(t *testing.T) {
 	newEntries := []LogEntry{MakeLogEntry(currentTerm+1, "new item")}
 
 	// should succeed if replacing an existing entry
-	assert.True(t, log.AppendEntries(int32(length-2), int32(currentTerm), newEntries))
+	assert.True(t, log.AppendEntries(Index(length-2), Term(currentTerm), newEntries))
 	assert.Equal(t, 5, len(log.Entries))
 	assert.Equal(t, "new item", log.Entries[4].Item)
 }
@@ -55,7 +55,7 @@ func TestAppendEntriesTermMatch(t *testing.T) {
 
 	// should fail if term doesn't match the prevTerm
 	newEntries = []LogEntry{MakeLogEntry(currentTerm+1, "new item")}
-	assert.False(t, log.AppendEntries(int32(length-1), int32(currentTerm+1), newEntries))
+	assert.False(t, log.AppendEntries(Index(length-1), Term(currentTerm+1), newEntries))
 }
 
 func TestAppendEntriesToEmpty(t *testing.T) {
@@ -76,7 +76,7 @@ func TestEntryConflict(t *testing.T) {
 	// Let's say we want the last three entries to conflict, due to increased
 	// term. We want the last three entries to all be deleted, and a new one
 	// inserted, so new length should be 3
-	assert.True(t, log.AppendEntries(1, int32(oldTerm), newEntries))
+	assert.True(t, log.AppendEntries(1, Term(oldTerm), newEntries))
 	assert.Equal(t, "item 1", log.Entries[1].Item) // 1 is unchanged
 	assert.Equal(t, newEntries[0], log.Entries[2]) // 2 is replaced
 	assert.Equal(t, 3, len(log.Entries))           // 4 and 5 are gone

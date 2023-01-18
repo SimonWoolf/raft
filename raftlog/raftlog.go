@@ -16,11 +16,14 @@ type RaftLog struct {
 	Entries []LogEntry
 }
 
+type Index = int32
+type Term = int32
+
 func MakeLogEntry(term int, item string) LogEntry {
-	return &raftrpc.LogEntry{Term: int32(term), Item: item}
+	return &raftrpc.LogEntry{Term: Term(term), Item: item}
 }
 
-func (r *RaftLog) AppendEntries(prevIndex int32, prevTerm int32, newEntries []LogEntry) bool {
+func (r *RaftLog) AppendEntries(prevIndex Index, prevTerm Term, newEntries []LogEntry) bool {
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex ...
 	if int(prevIndex) >= len(r.Entries) {
 		return false
@@ -41,7 +44,7 @@ func (r *RaftLog) AppendEntries(prevIndex int32, prevTerm int32, newEntries []Lo
 	// (in the common case of appending to the end of the array,
 	// len(entries) == newIndexStart, and the loop will run zero times)
 	newIndexStart := prevIndex + 1
-	newIndexEnd := prevIndex + int32(len(newEntries)) + 1
+	newIndexEnd := prevIndex + Index(len(newEntries)) + 1
 	numToCheck := utils.Min(len(newEntries), len(r.Entries)-int(newIndexStart))
 	for i := 0; i < numToCheck; i++ {
 		currentEntry := r.Entries[int(newIndexStart)+i]
