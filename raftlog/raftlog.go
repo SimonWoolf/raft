@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-type LogEntry *raftrpc.LogEntry // this has to be a *LogEntry and not a LogEntry
+type LogEntry = *raftrpc.LogEntry // this has to be a *LogEntry and not a LogEntry
 // because grpc-go for some reason shoves a mutex in the generated proto message
 // definition, which loudly whines if it's ever copied
 

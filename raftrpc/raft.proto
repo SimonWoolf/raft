@@ -2,21 +2,32 @@ syntax = 'proto3';
 option go_package = "raft/raftrpc";
 
 message LogEntry {
-  int32 term = 1;
+  int32  term = 1;
   string item = 2;
 }
 
+message ClientLogAppendRequest {
+  string item = 1;
+}
+
+message MaybeErrorResponse {
+  bool   result = 1;
+  string error  = 2;
+}
+
 message AppendEntriesRequest {
-  int32                   term = 1;
-  int32 prevIndex = 2;
-  int32 prevTerm = 3;
-  repeated LogEntry entries = 4;
+  int32             term      = 1;
+  int32             prevIndex = 2;
+  int32             prevTerm  = 3;
+  repeated LogEntry entries   = 4;
+  int32             nodeId    = 5;
 }
 
 message BoolResponse {
   bool result = 1;
 }
 
-service RaftService {
-  rpc AppendEntries(AppendEntriesRequest) returns (BoolResponse);
+service Raft {
+  rpc AppendEntries(AppendEntriesRequest)        returns (BoolResponse);
+  rpc ClientLogAppend(ClientLogAppendRequest)    returns (MaybeErrorResponse);
 }

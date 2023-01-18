@@ -127,7 +127,21 @@ func (r *RaftState) HandleClientLogAppend(item string) (bool, error) {
 // When received by a follower, it uses append_entries() to carry out the
 // operation and responds with an AppendEntriesResponse message to indicate
 // success or failure.
-func (r *RaftState) HandleAppendEntries() {
+func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) bool {
+	currentState, err := r.statem.State(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	if currentState != stateFollower {
+		log.Printf("Received append entries req from leader %d, but unable to handle as in state %v", req.NodeId, currentState)
+		return false
+	}
+
+	appendRes := r.log.AppendEntries(req.PrevIndex, req.PrevTerm, req.Entries)
+
+	log.Printf("Handled append entries from leader %d; prevIndex = %v; prevTerm = %v; result = %v\n", req.NodeId, req.PrevIndex, req.PrevTerm, appendRes)
+
+	return appendRes
 }
 
 // A message sent by a follower back to the Raft leader to indicate

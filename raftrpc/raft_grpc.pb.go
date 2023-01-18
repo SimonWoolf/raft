@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.2.0
 // - protoc             v3.12.4
-// source: protocol/raft.proto
+// source: raftrpc/raft.proto
 
 package raftrpc
 
@@ -18,88 +18,124 @@ import (
 // Requires gRPC-Go v1.32.0 or later.
 const _ = grpc.SupportPackageIsVersion7
 
-// RaftServiceClient is the client API for RaftService service.
+// RaftClient is the client API for Raft service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-type RaftServiceClient interface {
+type RaftClient interface {
 	AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*BoolResponse, error)
+	ClientLogAppend(ctx context.Context, in *ClientLogAppendRequest, opts ...grpc.CallOption) (*MaybeErrorResponse, error)
 }
 
-type raftServiceClient struct {
+type raftClient struct {
 	cc grpc.ClientConnInterface
 }
 
-func NewRaftServiceClient(cc grpc.ClientConnInterface) RaftServiceClient {
-	return &raftServiceClient{cc}
+func NewRaftClient(cc grpc.ClientConnInterface) RaftClient {
+	return &raftClient{cc}
 }
 
-func (c *raftServiceClient) AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*BoolResponse, error) {
+func (c *raftClient) AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*BoolResponse, error) {
 	out := new(BoolResponse)
-	err := c.cc.Invoke(ctx, "/RaftService/AppendEntries", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/Raft/AppendEntries", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// RaftServiceServer is the server API for RaftService service.
-// All implementations must embed UnimplementedRaftServiceServer
+func (c *raftClient) ClientLogAppend(ctx context.Context, in *ClientLogAppendRequest, opts ...grpc.CallOption) (*MaybeErrorResponse, error) {
+	out := new(MaybeErrorResponse)
+	err := c.cc.Invoke(ctx, "/Raft/ClientLogAppend", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RaftServer is the server API for Raft service.
+// All implementations must embed UnimplementedRaftServer
 // for forward compatibility
-type RaftServiceServer interface {
+type RaftServer interface {
 	AppendEntries(context.Context, *AppendEntriesRequest) (*BoolResponse, error)
-	mustEmbedUnimplementedRaftServiceServer()
+	ClientLogAppend(context.Context, *ClientLogAppendRequest) (*MaybeErrorResponse, error)
+	mustEmbedUnimplementedRaftServer()
 }
 
-// UnimplementedRaftServiceServer must be embedded to have forward compatible implementations.
-type UnimplementedRaftServiceServer struct {
+// UnimplementedRaftServer must be embedded to have forward compatible implementations.
+type UnimplementedRaftServer struct {
 }
 
-func (UnimplementedRaftServiceServer) AppendEntries(context.Context, *AppendEntriesRequest) (*BoolResponse, error) {
+func (UnimplementedRaftServer) AppendEntries(context.Context, *AppendEntriesRequest) (*BoolResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AppendEntries not implemented")
 }
-func (UnimplementedRaftServiceServer) mustEmbedUnimplementedRaftServiceServer() {}
+func (UnimplementedRaftServer) ClientLogAppend(context.Context, *ClientLogAppendRequest) (*MaybeErrorResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ClientLogAppend not implemented")
+}
+func (UnimplementedRaftServer) mustEmbedUnimplementedRaftServer() {}
 
-// UnsafeRaftServiceServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to RaftServiceServer will
+// UnsafeRaftServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to RaftServer will
 // result in compilation errors.
-type UnsafeRaftServiceServer interface {
-	mustEmbedUnimplementedRaftServiceServer()
+type UnsafeRaftServer interface {
+	mustEmbedUnimplementedRaftServer()
 }
 
-func RegisterRaftServiceServer(s grpc.ServiceRegistrar, srv RaftServiceServer) {
-	s.RegisterService(&RaftService_ServiceDesc, srv)
+func RegisterRaftServer(s grpc.ServiceRegistrar, srv RaftServer) {
+	s.RegisterService(&Raft_ServiceDesc, srv)
 }
 
-func _RaftService_AppendEntries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Raft_AppendEntries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AppendEntriesRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(RaftServiceServer).AppendEntries(ctx, in)
+		return srv.(RaftServer).AppendEntries(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/RaftService/AppendEntries",
+		FullMethod: "/Raft/AppendEntries",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RaftServiceServer).AppendEntries(ctx, req.(*AppendEntriesRequest))
+		return srv.(RaftServer).AppendEntries(ctx, req.(*AppendEntriesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-// RaftService_ServiceDesc is the grpc.ServiceDesc for RaftService service.
+func _Raft_ClientLogAppend_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClientLogAppendRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftServer).ClientLogAppend(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/Raft/ClientLogAppend",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftServer).ClientLogAppend(ctx, req.(*ClientLogAppendRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// Raft_ServiceDesc is the grpc.ServiceDesc for Raft service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
-var RaftService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "RaftService",
-	HandlerType: (*RaftServiceServer)(nil),
+var Raft_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "Raft",
+	HandlerType: (*RaftServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
 			MethodName: "AppendEntries",
-			Handler:    _RaftService_AppendEntries_Handler,
+			Handler:    _Raft_AppendEntries_Handler,
+		},
+		{
+			MethodName: "ClientLogAppend",
+			Handler:    _Raft_ClientLogAppend_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "protocol/raft.proto",
+	Metadata: "raftrpc/raft.proto",
 }
