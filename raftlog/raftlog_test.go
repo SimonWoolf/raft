@@ -13,25 +13,25 @@ func TestAppendEntriesMissing(t *testing.T) {
 	currentTerm := 3
 	length := 5
 	log := makeSimpleLog(length, currentTerm)
-	newEntries := []LogEntry{LogEntry{term: currentTerm, item: "new item"}}
+	newEntries := []LogEntry{MakeLogEntry(currentTerm, "new item")}
 
 	// should fail if there's missing entries. NB: it's the index of the _previous_
 	// entry, and we're zero-indexing, so the 'equal to length' case should fail,
 	// there should not already be an entry at that position
-	assert.False(t, log.AppendEntries(length, currentTerm, newEntries))
-	assert.Equal(t, 5, len(log.entries))
+	assert.False(t, log.AppendEntries(int32(length), int32(currentTerm), newEntries))
+	assert.Equal(t, 5, len(log.Entries))
 }
 
 func TestAppendEntriesAddingToEnd(t *testing.T) {
 	currentTerm := 3
 	length := 5
 	log := makeSimpleLog(length, currentTerm)
-	newEntries := []LogEntry{LogEntry{term: currentTerm, item: "new item"}}
+	newEntries := []LogEntry{MakeLogEntry(currentTerm, "new item")}
 
 	// should succeed if pushing right on the end
-	assert.True(t, log.AppendEntries(length-1, currentTerm, newEntries))
-	assert.Equal(t, 6, len(log.entries))
-	assert.Equal(t, "new item", log.entries[5].item)
+	assert.True(t, log.AppendEntries(int32(length-1), int32(currentTerm), newEntries))
+	assert.Equal(t, 6, len(log.Entries))
+	assert.Equal(t, "new item", log.Entries[5].Item)
 }
 
 func TestAppendEntriesReplacing(t *testing.T) {
@@ -39,31 +39,31 @@ func TestAppendEntriesReplacing(t *testing.T) {
 	length := 5
 	log := makeSimpleLog(length, currentTerm)
 	// nb: current+1 to make sure it does actually replace
-	newEntries := []LogEntry{LogEntry{term: currentTerm + 1, item: "new item"}}
+	newEntries := []LogEntry{MakeLogEntry(currentTerm+1, "new item")}
 
 	// should succeed if replacing an existing entry
-	assert.True(t, log.AppendEntries(length-2, currentTerm, newEntries))
-	assert.Equal(t, 5, len(log.entries))
-	assert.Equal(t, "new item", log.entries[4].item)
+	assert.True(t, log.AppendEntries(int32(length-2), int32(currentTerm), newEntries))
+	assert.Equal(t, 5, len(log.Entries))
+	assert.Equal(t, "new item", log.Entries[4].Item)
 }
 
 func TestAppendEntriesTermMatch(t *testing.T) {
 	currentTerm := 3
 	length := 5
 	log := makeSimpleLog(length, currentTerm)
-	newEntries := []LogEntry{LogEntry{term: currentTerm, item: "new item"}}
+	newEntries := []LogEntry{MakeLogEntry(currentTerm, "new item")}
 
 	// should fail if term doesn't match the prevTerm
-	newEntries = []LogEntry{LogEntry{term: currentTerm + 1, item: "new item"}}
-	assert.False(t, log.AppendEntries(length-1, currentTerm+1, newEntries))
+	newEntries = []LogEntry{MakeLogEntry(currentTerm+1, "new item")}
+	assert.False(t, log.AppendEntries(int32(length-1), int32(currentTerm+1), newEntries))
 }
 
 func TestAppendEntriesToEmpty(t *testing.T) {
 	// check the empty-log case (no previous entry) case works
-	log := makeSimpleLog(1, 0)
-	newEntries := []LogEntry{LogEntry{term: 1, item: "new item"}}
+	log := makeSimpleLog(0, 0)
+	newEntries := []LogEntry{MakeLogEntry(1, "new item")}
 	assert.True(t, log.AppendEntries(-1, -1, newEntries))
-	assert.Equal(t, 1, len(log.entries))
+	assert.Equal(t, 1, len(log.Entries))
 }
 
 func TestEntryConflict(t *testing.T) {
@@ -71,15 +71,15 @@ func TestEntryConflict(t *testing.T) {
 	oldTerm := 3
 	newTerm := 4
 	log := makeSimpleLog(length, oldTerm)
-	newEntries := []LogEntry{LogEntry{term: newTerm, item: "new item"}}
+	newEntries := []LogEntry{MakeLogEntry(newTerm, "new item")}
 
 	// Let's say we want the last three entries to conflict, due to increased
 	// term. We want the last three entries to all be deleted, and a new one
 	// inserted, so new length should be 3
-	assert.True(t, log.AppendEntries(1, oldTerm, newEntries))
-	assert.Equal(t, "item 1", log.entries[1].item) // 1 is unchanged
-	assert.Equal(t, newEntries[0], log.entries[2]) // 2 is replaced
-	assert.Equal(t, 3, len(log.entries))           // 4 and 5 are gone
+	assert.True(t, log.AppendEntries(1, int32(oldTerm), newEntries))
+	assert.Equal(t, "item 1", log.Entries[1].Item) // 1 is unchanged
+	assert.Equal(t, newEntries[0], log.Entries[2]) // 2 is replaced
+	assert.Equal(t, 3, len(log.Entries))           // 4 and 5 are gone
 }
 
 // Construct the set of logs described by fig 7 of the raft paper, do the same
@@ -94,7 +94,7 @@ func TestFigSeven(t *testing.T) {
 		makeLogToSpec([]termSpec{{1, 3}, {2, 3}, {3, 5}}),
 	}
 
-	newEntries := []LogEntry{LogEntry{term: 8, item: "x"}}
+	newEntries := []LogEntry{MakeLogEntry(8, "x")}
 
 	// (a) False. Missing entry at index 10.
 	assert.False(t, logs[0].AppendEntries(9, 6, newEntries))
@@ -123,10 +123,7 @@ func addEntries(log *RaftLog, spec []termSpec) *RaftLog {
 	for _, v := range spec {
 		term, numInTerm := v[0], v[1]
 		for i := 0; i < numInTerm; i++ {
-			log.entries = append(log.entries, LogEntry{
-				term: term,
-				item: fmt.Sprintf("item %d", i),
-			})
+			log.Entries = append(log.Entries, MakeLogEntry(term, fmt.Sprintf("item %d", i)))
 		}
 	}
 	return log
