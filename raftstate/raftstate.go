@@ -56,8 +56,6 @@ type PendingClientReq struct {
 	ResultChannel chan error
 	Responses     *[clusterSize]*bool // use pointer to bool as a crude
 	// Maybe[bool], so we can distinguish no reply yet from false reply
-	// TODO actually a negative reply doesn't need to be stored, as it results in
-	// a retry at a lower index -- can we go for just normal bool...?
 }
 
 type RaftState struct {
@@ -185,7 +183,14 @@ func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) bool 
 // success/failure of an earlier AppendEntries message. A failure tells the
 // leader to retry the AppendEntries with earlier log entries.
 func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, nodeId NodeId, numAppended Index) {
-	if !success {
+	log.Printf("Handling append entries response; prevIndex = %v; success = %v; nodeIndex = %v\n", prevIndex, success, nodeId)
+
+	if success {
+		// • If successful: update nextIndex and matchIndex for
+		// follower (§5.3)
+		r.matchIndices[nodeId] = utils.Max(r.matchIndices[nodeId], prevIndex+numAppended)
+		r.nextIndices[nodeId] = prevIndex + 1 + numAppended
+	} else if prevIndex > -1 {
 		// • If AppendEntries fails because of log inconsistency: decrement
 		// nextIndex and retry (§5.3)
 		//
@@ -197,14 +202,20 @@ func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, n
 		// request. There may still be a pending client req for the original entry
 		// to be replicated, and that'll be fulfilled by the response if this
 		// succeeds.
-		index := prevIndex
-		prevIndex = utils.Max(index-1, -1)
-		var prevTerm Term = -1
-		if prevIndex >= 0 {
+		//
+		index := utils.Max(prevIndex, 0)
+		var prevTerm Term
+		if index == 0 {
+			prevIndex = -1
+			prevTerm = Term(-1)
+		} else {
+			prevIndex = index - 1
 			prevTerm = r.log.Entries[prevIndex].Term
 		}
 
-		r.nextIndices[nodeId] = prevIndex // TODO is this right?
+		// the nextIndex is updated to the index we're currently sending, unless &
+		// until we hear back and confirm that one is successfully applied
+		r.nextIndices[nodeId] = index
 		logEntries := r.log.GetEntriesFrom(index)
 
 		r.BroadcastChan <- OutboxMessage{
@@ -218,12 +229,14 @@ func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, n
 			Recipients: []NodeId{nodeId},
 		}
 		return
+	} else {
+		// If the prevIndex was already -1, there's no further decrementing we can
+		// do, and no point retrying as the request will be identical. Continue on
+		// to mark it as a failure for pendingClientReq purposes. (This should
+		// never happen in production, but is convenient to be able to do this for
+		// test purposes)
+		log.Printf("Append entries response for a request containing the complete log unexpectedly failed; nodeId = %v", nodeId)
 	}
-
-	// • If successful: update nextIndex and matchIndex for
-	// follower (§5.3)
-	r.matchIndices[nodeId] = utils.Max(r.matchIndices[nodeId], prevIndex+numAppended)
-	r.nextIndices[nodeId] = prevIndex + 1 + numAppended
 
 	// Update any pending requests for any of the indices we've replicated
 	for i := prevIndex; i < prevIndex+numAppended; i++ {
@@ -252,8 +265,6 @@ func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, n
 			pendingReq.ResultChannel <- nil
 			delete(r.pendingClientReqs, prevIndex)
 		} else if numReplies >= clusterSize-1 {
-			// TODO this case can't actually happen since on !success we retry with
-			// an earlier index, so leave the entry blank
 			pendingReq.ResultChannel <- errors.New("Unsuccessful result from a majority of nodes")
 			delete(r.pendingClientReqs, prevIndex)
 		}
