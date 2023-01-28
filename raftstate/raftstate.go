@@ -64,6 +64,7 @@ type RaftState struct {
 	statem        *stateless.StateMachine
 	currentTerm   Term
 	BroadcastChan chan OutboxMessage
+	SmApplyChan   chan string // channel for items to apply to the state machine
 	otherNodeIds  []NodeId
 
 	// indexed by prevIndex. Note that a request can continue to be pending while
@@ -95,7 +96,7 @@ type RaftState struct {
 	lastApplied Index
 }
 
-func NewRaftState(broadcastChan chan OutboxMessage, otherNodeIds []NodeId) *RaftState {
+func NewRaftState(broadcastChan chan OutboxMessage, smApplyChan chan string, otherNodeIds []NodeId) *RaftState {
 	// First configure the state machine
 	statem := stateless.NewStateMachine(stateFollower)
 
@@ -128,6 +129,7 @@ func NewRaftState(broadcastChan chan OutboxMessage, otherNodeIds []NodeId) *Raft
 		otherNodeIds:      otherNodeIds,
 		commitIndex:       -1,
 		lastApplied:       -1,
+		SmApplyChan:       smApplyChan,
 	}
 }
 
@@ -343,14 +345,10 @@ func (r *RaftState) updateStateMachine() {
 		r.lastApplied++
 		log.Printf("Sending item with index %v to state machine", r.lastApplied)
 		item := r.log.Entries[r.lastApplied].Item
-		r.sendToStateMachine(item)
+		r.SmApplyChan <- item
 		// repeat until lastApplied is caught up
 		r.updateStateMachine()
 	}
-}
-
-func (r *RaftState) sendToStateMachine(item string) {
-	// TODO
 }
 
 // Temp, remove once we have actual stuff working

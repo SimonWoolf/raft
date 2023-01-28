@@ -12,14 +12,14 @@ import (
 )
 
 func TestNoClientAppendWhenFollower(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), []NodeId{})
+	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
 	res, err := r.HandleClientLogAppend("item")
 	assert.False(t, res)
 	assert.NotNil(t, err)
 }
 
 func TestNoAppendWhenNewerTerm(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), []NodeId{})
+	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
 	r.currentTerm = 2
 	assert.False(t, r.HandleAppendEntries(
 		&raftrpc.AppendEntriesRequest{
@@ -35,7 +35,7 @@ func TestNoAppendWhenNewerTerm(t *testing.T) {
 // raftlog_test. Here we check one failure and one success case to check the
 // integration.
 func TestNoAppendWhenNoPreviousItem(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), []NodeId{})
+	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
 	assert.False(t, r.HandleAppendEntries(
 		&raftrpc.AppendEntriesRequest{
 			Term:      Term(1),
@@ -47,7 +47,7 @@ func TestNoAppendWhenNoPreviousItem(t *testing.T) {
 }
 
 func TestAppendCanSucceed(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), []NodeId{})
+	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
 	assert.True(t, r.HandleAppendEntries(
 		&raftrpc.AppendEntriesRequest{
 			Term:      Term(1),
@@ -91,7 +91,7 @@ func TestAppendResponseMajorityFailure(t *testing.T) {
 
 func setUpEmptyLeader(t *testing.T) *RaftState {
 	broadcastChan := make(chan OutboxMessage, 10)
-	r := NewRaftState(broadcastChan, []NodeId{1, 2, 3, 4})
+	r := NewRaftState(broadcastChan, make(chan string, 10), []NodeId{1, 2, 3, 4})
 
 	// put into the leader state
 	r.statem.Fire(triggerElection)

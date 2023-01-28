@@ -22,6 +22,7 @@ type RaftNode struct {
 	RaftState   *raftstate.RaftState
 	Id          NodeId
 	PeerClients map[NodeId]*raftrpc.RpcClient
+	SmApplyChan chan string
 }
 
 func main() {
@@ -52,7 +53,8 @@ func startNode(myNode conf.Node) *RaftNode {
 	otherNodeIds := utils.Map(otherNodes, func(node conf.Node) NodeId { return node.NodeId })
 
 	broadcastChannel := make(chan raftstate.OutboxMessage, 10)
-	raftState := raftstate.NewRaftState(broadcastChannel, otherNodeIds)
+	smApplyChan := make(chan string, 10)
+	raftState := raftstate.NewRaftState(broadcastChannel, smApplyChan, otherNodeIds)
 
 	// TODO: once we have consensus working, can drop this startLeader stuff
 	if myNode.StartLeader {
@@ -71,6 +73,7 @@ func startNode(myNode conf.Node) *RaftNode {
 		GrpcServer:  grpcServer,
 		RaftState:   raftState,
 		PeerClients: peerClients,
+		SmApplyChan: smApplyChan,
 	}
 	raftrpc.RegisterRaftServer(grpcServer, raftNode)
 
@@ -110,7 +113,6 @@ func (r *RaftNode) monitorBroadcastChannel() {
 		default:
 			panic(fmt.Sprintf("Unhandled message type %v", method))
 		}
-
 	}
 }
 

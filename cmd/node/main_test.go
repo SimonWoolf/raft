@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"raft/conf"
 	"raft/raftrpc"
 	"raft/utils"
@@ -27,12 +26,18 @@ func TestFiveNodeFarm(t *testing.T) {
 		// Expect at least three of five nodes to have it in their log by the time the client responds
 		numSuccesses := 0
 		for _, node := range nodes {
-			fmt.Printf("Entries for node %d: %v", node.Id, node.RaftState.GetAllEntries())
 			entries := node.RaftState.GetAllEntries()
 			if len(entries) >= 1 && entries[0] == "set x 10" {
 				numSuccesses++
 			}
 		}
 		assert.GreaterOrEqual(t, numSuccesses, 3)
+
+		// Expect the leader to have applied the item to the state machine
+		leader := *utils.Find(nodes, func(n *RaftNode) bool {
+			return n.RaftState.IsLeader()
+		})
+		item := <-leader.SmApplyChan
+		assert.Equal(t, "set x 10", item)
 	})
 }
