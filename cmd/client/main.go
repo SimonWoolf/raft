@@ -15,17 +15,17 @@ import (
 func main() {
 	flag.Parse()
 	leaderNode := conf.Nodes[0] // for now just assume that node 0 is the leader
-	grpcClient := raftrpc.MakeRpcClient(leaderNode.Port)
+	grpcClient := raftrpc.MakeRpcClient(leaderNode.NodeId, leaderNode.Port)
 	runInputLoop(grpcClient)
 }
 
-func runInputLoop(grpcClient raftrpc.RaftClient) {
+func runInputLoop(grpcClient *raftrpc.RpcClient) {
 	stdinReader := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Print("> ")
 		msg := utils.MustSucceed(stdinReader.ReadString('\n'))
 		msg = strings.TrimSpace(msg) + "\n"
-		resp := raftrpc.SendClientAppend(grpcClient, msg)
+		resp := grpcClient.SendClientAppend(msg)
 		log.Printf("Response: %v (err was %v)\n", resp.Result, resp.Error)
 	}
 }
