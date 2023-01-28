@@ -9,6 +9,7 @@ import (
 	"raft/utils"
 
 	"github.com/qmuntal/stateless"
+	"golang.org/x/exp/maps"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -72,13 +73,26 @@ type RaftState struct {
 	// on the result
 	pendingClientReqs map[Index]PendingClientReq
 
+	//=== Volatile leader state ===
+
 	// for each server, index of the next log entry to send to that server
 	// (initialized to leader last log index + 1)
 	nextIndices map[NodeId]Index
 
 	// for each server, index of highest log entry known to be replicated on
-	// server (initialized to 0, increases monotonically
+	// server (initialized to 0, increases monotonically.
+	// (NB: we actually initialize to -1 because we're using zero-indexing, paper
+	// uses 1-indexing)
 	matchIndices map[NodeId]Index
+
+	//=== Volatile all-node state ===
+
+	// index of highest log entry known to be committed (initialized to 0
+	// [actually -1, see matchIndices], increases monotonically).
+	commitIndex Index
+	// index of highest log entry applied to state machine (initialized to 0,
+	// [actually -1, see matchIndices], increases monotonically)
+	lastApplied Index
 }
 
 func NewRaftState(broadcastChan chan OutboxMessage, otherNodeIds []NodeId) *RaftState {
@@ -99,7 +113,7 @@ func NewRaftState(broadcastChan chan OutboxMessage, otherNodeIds []NodeId) *Raft
 	matchIndices := make(map[NodeId]Index)
 	nextIndices := make(map[NodeId]Index)
 	for _, nodeId := range otherNodeIds {
-		matchIndices[nodeId] = 0
+		matchIndices[nodeId] = -1
 		nextIndices[nodeId] = 0 // TODO should be initialized to leader log index + 1 on becoming leader
 	}
 
@@ -112,6 +126,8 @@ func NewRaftState(broadcastChan chan OutboxMessage, otherNodeIds []NodeId) *Raft
 		matchIndices:      matchIndices,
 		nextIndices:       nextIndices,
 		otherNodeIds:      otherNodeIds,
+		commitIndex:       -1,
+		lastApplied:       -1,
 	}
 }
 
@@ -168,13 +184,32 @@ func (r *RaftState) HandleClientLogAppend(item string) (bool, error) {
 func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) bool {
 	currentState := utils.MustSucceed(r.statem.State(context.Background()))
 	if currentState != stateFollower {
-		log.Printf("Received append entries req from leader %d, but unable to handle as in state %v", req.NodeId, currentState)
+		log.Printf("Received append entries req from leader %d, but unable to handle as in state %v", req.LeaderId, currentState)
 		return false
 	}
 
+	// 1. Reply false if term < currentTerm (§5.1)
+	if req.Term < r.currentTerm {
+		return false
+	}
+
+	// 2. Reply false if log doesn’t contain an entry at prevLogIndex
+	// whose term matches prevLogTerm (§5.3)
+	// 3. If an existing entry conflicts with a new one (same index
+	// but different terms), delete the existing entry and all that
+	// follow it (§5.3)
+	// 4. Append any new entries not already in the log
+	// ^^^ all checks which do are not functions of raftstate are handled by the RaftLog
 	appendRes := r.log.AppendEntries(req.PrevIndex, req.PrevTerm, req.Entries)
 
-	log.Printf("Handled append entries from leader %d; prevIndex = %v; prevTerm = %v; result = %v\n", req.NodeId, req.PrevIndex, req.PrevTerm, appendRes)
+	// 5. If leaderCommit > commitIndex, set commitIndex =
+	// min(leaderCommit, index of last new entry)
+	if appendRes && req.LeaderCommit > r.commitIndex {
+		r.commitIndex = utils.Min(req.LeaderCommit, req.PrevIndex+Index(len(req.Entries)))
+		r.updateStateMachine()
+	}
+
+	log.Printf("Handled append entries from leader %d; prevIndex = %v; prevTerm = %v; result = %v\n", req.LeaderId, req.PrevIndex, req.PrevTerm, appendRes)
 
 	return appendRes
 }
@@ -183,13 +218,21 @@ func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) bool 
 // success/failure of an earlier AppendEntries message. A failure tells the
 // leader to retry the AppendEntries with earlier log entries.
 func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, nodeId NodeId, numAppended Index) {
+	currentState := utils.MustSucceed(r.statem.State(context.Background()))
+	if currentState != stateLeader {
+		log.Printf("Ignoring append entries response from %v as we're no longer the leader", nodeId)
+		return
+	}
+
 	log.Printf("Handling append entries response; prevIndex = %v; success = %v; nodeIndex = %v\n", prevIndex, success, nodeId)
 
 	if success {
 		// • If successful: update nextIndex and matchIndex for
 		// follower (§5.3)
+		log.Printf("Updating match index for nodeid %v, prevIndex = %v, numAppended = %v, matchIndex = %v", nodeId, prevIndex, numAppended, utils.Max(r.matchIndices[nodeId], prevIndex+numAppended))
 		r.matchIndices[nodeId] = utils.Max(r.matchIndices[nodeId], prevIndex+numAppended)
 		r.nextIndices[nodeId] = prevIndex + 1 + numAppended
+		r.leaderUpdateCommitIndex()
 	} else if prevIndex > -1 {
 		// • If AppendEntries fails because of log inconsistency: decrement
 		// nextIndex and retry (§5.3)
@@ -271,6 +314,45 @@ func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, n
 	}
 }
 
+// Should be called immediately on the leader after anything mutates matchIndices
+func (r *RaftState) leaderUpdateCommitIndex() {
+	// If there exists an N such that N > commitIndex, a majority
+	// of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+	// set commitIndex = N
+
+	myLastLogIndex := Index(len(r.log.Entries) - 1)
+	allLastLogIndices := append(maps.Values(r.matchIndices), myLastLogIndex)
+
+	// The median replicated log index (or the largest one <= that that satisfies
+	// the term constraint) is the N we want.
+	medianIndex := utils.Median(allLastLogIndices)
+	for i := medianIndex; i > r.commitIndex; i-- {
+		if r.log.Entries[i].Term == r.currentTerm {
+			r.commitIndex = i
+			r.updateStateMachine()
+			return
+		}
+	}
+}
+
+// Should be called on all roles once anything changes commitIndex
+func (r *RaftState) updateStateMachine() {
+	// If commitIndex > lastApplied: increment lastApplied, apply
+	// log[lastApplied] to state machine (§5.3)
+	if r.commitIndex > r.lastApplied {
+		r.lastApplied++
+		log.Printf("Sending item with index %v to state machine", r.lastApplied)
+		item := r.log.Entries[r.lastApplied].Item
+		r.sendToStateMachine(item)
+		// repeat until lastApplied is caught up
+		r.updateStateMachine()
+	}
+}
+
+func (r *RaftState) sendToStateMachine(item string) {
+	// TODO
+}
+
 // Temp, remove once we have actual stuff working
 func (r *RaftState) BecomeLeader() {
 	currentState := utils.MustSucceed(r.statem.State(context.Background()))
@@ -278,6 +360,10 @@ func (r *RaftState) BecomeLeader() {
 		r.statem.Fire(triggerElection)
 		r.statem.Fire(winElection)
 	}
+}
+
+func (r *RaftState) IsLeader() bool {
+	return utils.MustSucceed(r.statem.IsInState(stateLeader))
 }
 
 // includes uncommited entries

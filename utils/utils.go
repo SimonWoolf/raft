@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"golang.org/x/exp/constraints"
+	"golang.org/x/exp/slices"
 )
 
 // can't believe this shit isn't all in the standard library
@@ -55,6 +56,20 @@ func Find[T any](slice []T, f func(T) bool) *T {
 		}
 	}
 	return nil
+}
+
+func Median[T constraints.Integer | constraints.Float](slice []T) T {
+	// Sort is in-place, so clone first
+	slice = slices.Clone(slice)
+	slices.Sort(slice)
+	l := len(slice)
+	if l == 0 {
+		return T(0)
+	} else if l%2 != 0 {
+		return slice[(l-1)/2]
+	} else {
+		return (slice[l/2] + slice[(l/2)-1]) / T(2)
+	}
 }
 
 // NR == No Result

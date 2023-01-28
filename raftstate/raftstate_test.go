@@ -60,6 +60,8 @@ func TestAppendCanSucceed(t *testing.T) {
 
 func TestAppendResponseMajoritySuccess(t *testing.T) {
 	r := setUpEmptyLeader(t)
+	assert.EqualValues(t, -1, r.commitIndex)
+	assert.EqualValues(t, -1, r.lastApplied)
 
 	// mock a success response from the majority of servers
 	// (2 others is a majority as we can count ourselves)
@@ -69,6 +71,8 @@ func TestAppendResponseMajoritySuccess(t *testing.T) {
 	res, err := r.HandleClientLogAppend("item")
 	assert.True(t, res)
 	assert.Nil(t, err)
+	assert.EqualValues(t, 0, r.commitIndex)
+	assert.EqualValues(t, 0, r.lastApplied)
 }
 
 func TestAppendResponseMajorityFailure(t *testing.T) {
@@ -81,11 +85,13 @@ func TestAppendResponseMajorityFailure(t *testing.T) {
 	res, err := r.HandleClientLogAppend("item")
 	assert.False(t, res)
 	assert.NotNil(t, err)
+	assert.EqualValues(t, -1, r.commitIndex)
+	assert.EqualValues(t, -1, r.lastApplied)
 }
 
 func setUpEmptyLeader(t *testing.T) *RaftState {
 	broadcastChan := make(chan OutboxMessage, 10)
-	r := NewRaftState(broadcastChan, []NodeId{})
+	r := NewRaftState(broadcastChan, []NodeId{1, 2, 3, 4})
 
 	// put into the leader state
 	r.statem.Fire(triggerElection)

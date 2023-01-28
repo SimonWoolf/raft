@@ -16,11 +16,12 @@ message MaybeErrorResponse {
 }
 
 message AppendEntriesRequest {
-  int32             term      = 1;
-  int32             prevIndex = 2;
-  int32             prevTerm  = 3;
-  repeated LogEntry entries   = 4;
-  int32             nodeId    = 5;
+  int32             term         = 1;
+  int32             prevIndex    = 2;
+  int32             prevTerm     = 3;
+  repeated LogEntry entries      = 4;
+  int32             leaderId     = 5;
+  int32             leaderCommit = 6;
 }
 
 message BoolResponse {
