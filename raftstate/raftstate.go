@@ -28,34 +28,62 @@ const (
 	discoverLeader     = "DiscoverLeader"
 )
 
-type NodeIndex int
-
 const clusterSize = 5
-const majority = 3
+const repliesForMajority = 2 // 2 other servers plus ourselves is a majority
 
 type Index = raftlog.Index
 type Term = raftlog.Term
+type NodeId = int
 
 type ProtobufMessage interface {
 	ProtoMessage()
 	ProtoReflect() protoreflect.Message
 }
 
+type BroadcastMsgType string
+
+const (
+	AppendMsgType BroadcastMsgType = "AppendEntries"
+)
+
+type OutboxMessage struct {
+	Msg        ProtobufMessage
+	MsgType    BroadcastMsgType // obligatory grumble at the lack of proper tagged unions
+	Recipients []NodeId
+}
+
 type PendingClientReq struct {
 	ResultChannel chan error
 	Responses     *[clusterSize]*bool // use pointer to bool as a crude
 	// Maybe[bool], so we can distinguish no reply yet from false reply
+	// TODO actually a negative reply doesn't need to be stored, as it results in
+	// a retry at a lower index -- can we go for just normal bool...?
 }
 
 type RaftState struct {
-	log               *raftlog.RaftLog
-	statem            *stateless.StateMachine
-	currentTerm       Term
-	pendingClientReqs map[Index]PendingClientReq // indexed by prevIndex
-	BroadcastChan     chan ProtobufMessage
+	log           *raftlog.RaftLog
+	statem        *stateless.StateMachine
+	currentTerm   Term
+	BroadcastChan chan OutboxMessage
+	otherNodeIds  []NodeId
+
+	// indexed by prevIndex. Note that a request can continue to be pending while
+	// the leader goes back and forth with a follower, backfilling earlier
+	// indices; it will be fulfilled when it reaches the current one. We don't
+	// keep pendingClientReqs for the backfills, only when there's someone waiting
+	// on the result
+	pendingClientReqs map[Index]PendingClientReq
+
+	// for each server, index of the next log entry to send to that server
+	// (initialized to leader last log index + 1)
+	nextIndices map[NodeId]Index
+
+	// for each server, index of highest log entry known to be replicated on
+	// server (initialized to 0, increases monotonically
+	matchIndices map[NodeId]Index
 }
 
-func NewRaftState(broadcastChan chan ProtobufMessage) *RaftState {
+func NewRaftState(broadcastChan chan OutboxMessage, otherNodeIds []NodeId) *RaftState {
 	// First configure the state machine
 	statem := stateless.NewStateMachine(stateFollower)
 
@@ -70,12 +98,22 @@ func NewRaftState(broadcastChan chan ProtobufMessage) *RaftState {
 	statem.Configure(stateLeader).
 		Permit(discoverHigherTerm, stateFollower)
 
+	matchIndices := make(map[NodeId]Index)
+	nextIndices := make(map[NodeId]Index)
+	for _, nodeId := range otherNodeIds {
+		matchIndices[nodeId] = 0
+		nextIndices[nodeId] = 0 // TODO should be initialized to leader log index + 1 on becoming leader
+	}
+
 	return &RaftState{
 		log:               &raftlog.RaftLog{},
 		statem:            statem,
 		currentTerm:       1,
 		pendingClientReqs: make(map[Index]PendingClientReq),
 		BroadcastChan:     broadcastChan,
+		matchIndices:      matchIndices,
+		nextIndices:       nextIndices,
+		otherNodeIds:      otherNodeIds,
 	}
 }
 
@@ -93,7 +131,7 @@ func (r *RaftState) HandleClientLogAppend(item string) (bool, error) {
 	entries := []raftlog.LogEntry{entry}
 	prevIndex := Index(len(r.log.Entries) - 1)
 	var prevTerm Term = -1
-	if prevIndex > 0 {
+	if prevIndex >= 0 {
 		prevTerm = r.log.Entries[prevIndex].Term
 	}
 	r.log.AppendEntries(prevIndex, prevTerm, entries)
@@ -109,11 +147,15 @@ func (r *RaftState) HandleClientLogAppend(item string) (bool, error) {
 		Responses:     &[clusterSize]*bool{},
 	}
 
-	r.BroadcastChan <- &raftrpc.AppendEntriesRequest{
-		Term:      Term(r.currentTerm),
-		PrevIndex: prevIndex,
-		PrevTerm:  prevTerm,
-		Entries:   []*raftrpc.LogEntry{entry},
+	r.BroadcastChan <- OutboxMessage{
+		Msg: &raftrpc.AppendEntriesRequest{
+			Term:      Term(r.currentTerm),
+			PrevIndex: prevIndex,
+			PrevTerm:  prevTerm,
+			Entries:   []*raftrpc.LogEntry{entry},
+		},
+		MsgType:    AppendMsgType,
+		Recipients: r.otherNodeIds,
 	}
 
 	err := <-resultChan
@@ -142,35 +184,79 @@ func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) bool 
 // A message sent by a follower back to the Raft leader to indicate
 // success/failure of an earlier AppendEntries message. A failure tells the
 // leader to retry the AppendEntries with earlier log entries.
-func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, nodeIndex int) {
-	pendingReq, exists := r.pendingClientReqs[prevIndex]
-	if !exists {
-		// eg for a req that we've already responded to, say because we've heard a
-		// success from the majority
-		log.Printf("Ignoring append entries response for index = %v that we no longer care about (but success = %v; nodeIndex = %v)", prevIndex, success, nodeIndex)
+func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, nodeId NodeId, numAppended Index) {
+	if !success {
+		// • If AppendEntries fails because of log inconsistency: decrement
+		// nextIndex and retry (§5.3)
+		//
+		// NB: the Term in the request is not the term of the entry being sent.
+		// The entries are LogEntries, they each have their own terms. It's just
+		// the current leader's term, used to check the validity of the request.
+		//
+		// We don't set up a pending client request for this -- it's not a client
+		// request. There may still be a pending client req for the original entry
+		// to be replicated, and that'll be fulfilled by the response if this
+		// succeeds.
+		index := prevIndex
+		prevIndex = utils.Max(index-1, -1)
+		var prevTerm Term = -1
+		if prevIndex >= 0 {
+			prevTerm = r.log.Entries[prevIndex].Term
+		}
+
+		r.nextIndices[nodeId] = prevIndex // TODO is this right?
+		logEntries := r.log.GetEntriesFrom(index)
+
+		r.BroadcastChan <- OutboxMessage{
+			Msg: &raftrpc.AppendEntriesRequest{
+				Term:      Term(r.currentTerm),
+				PrevIndex: prevIndex,
+				PrevTerm:  prevTerm,
+				Entries:   logEntries,
+			},
+			MsgType:    AppendMsgType,
+			Recipients: []NodeId{nodeId},
+		}
 		return
 	}
 
-	pendingReq.Responses[nodeIndex] = &success
+	// • If successful: update nextIndex and matchIndex for
+	// follower (§5.3)
+	r.matchIndices[nodeId] = utils.Max(r.matchIndices[nodeId], prevIndex+numAppended)
+	r.nextIndices[nodeId] = prevIndex + 1 + numAppended
 
-	numReplies, numSuccesses := 0, 0
-	for _, v := range pendingReq.Responses {
-		if v != nil {
-			numReplies++
-			if *v == true {
-				numSuccesses++
+	// Update any pending requests for any of the indices we've replicated
+	for i := prevIndex; i < prevIndex+numAppended; i++ {
+		pendingReq, exists := r.pendingClientReqs[i]
+		if !exists {
+			// eg for a req that we've already responded to, say because we've heard a
+			// success from the majority
+			log.Printf("Ignoring append entries response for index = %v with no corresponding pending client request (but success = %v; nodeIndex = %v)", i, success, nodeId)
+			return
+		}
+		pendingReq.Responses[nodeId] = &success
+
+		numReplies, numSuccesses := 0, 0
+		for _, v := range pendingReq.Responses {
+			if v != nil {
+				numReplies++
+				if *v == true {
+					numSuccesses++
+				}
 			}
 		}
-	}
 
-	log.Printf("Handling append entries response; prevIndex = %v; success = %v; nodeIndex = %v; numSuccesses = %v; numReplies = %v\n", prevIndex, success, nodeIndex, numSuccesses, numReplies)
+		log.Printf("Handling append entries response; prevIndex = %v; success = %v; nodeIndex = %v; numSuccesses = %v; numReplies = %v\n", prevIndex, success, nodeId, numSuccesses, numReplies)
 
-	if numSuccesses >= majority {
-		pendingReq.ResultChannel <- nil
-		delete(r.pendingClientReqs, prevIndex)
-	} else if numReplies >= clusterSize {
-		pendingReq.ResultChannel <- errors.New("Unsuccessful result from a majority of nodes")
-		delete(r.pendingClientReqs, prevIndex)
+		if numSuccesses >= repliesForMajority {
+			pendingReq.ResultChannel <- nil
+			delete(r.pendingClientReqs, prevIndex)
+		} else if numReplies >= clusterSize-1 {
+			// TODO this case can't actually happen since on !success we retry with
+			// an earlier index, so leave the entry blank
+			pendingReq.ResultChannel <- errors.New("Unsuccessful result from a majority of nodes")
+			delete(r.pendingClientReqs, prevIndex)
+		}
 	}
 }
 
@@ -181,6 +267,11 @@ func (r *RaftState) BecomeLeader() {
 		r.statem.Fire(triggerElection)
 		r.statem.Fire(winElection)
 	}
+}
+
+// includes uncommited entries
+func (r *RaftState) GetAllEntries() []string {
+	return utils.Map(r.log.Entries, func(le raftlog.LogEntry) string { return le.Item })
 }
 
 // Expiration of a heartbeat timer on the leader. When received, the leader

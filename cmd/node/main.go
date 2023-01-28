@@ -14,48 +14,60 @@ import (
 	"google.golang.org/grpc"
 )
 
-type NodeId = int
-
-var (
-	host   = "localhost"
-	nodeId = flag.Int("nodeId", 0, "The node id")
-)
+type NodeId = raftstate.NodeId
 
 type RaftNode struct {
 	raftrpc.UnimplementedRaftServer
 	GrpcServer  *grpc.Server
 	RaftState   *raftstate.RaftState
-	PeerClients map[NodeId]raftrpc.RaftClient
+	Id          NodeId
+	PeerClients map[NodeId]*raftrpc.RpcClient
 }
 
 func main() {
+	nodeId := flag.Int("nodeId", 0, "The node id")
 	flag.Parse()
+
 	node := utils.Find(conf.Nodes, func(n conf.Node) bool {
 		return n.NodeId == *nodeId
 	})
 	if node == nil {
 		log.Fatalf("Unable to match nodeId %d in conf\n", *nodeId)
 	}
-	port := node.Port
-	address := fmt.Sprintf("%s:%d", host, port)
-	sock := utils.MustSucceed(net.Listen("tcp", address))
 
-	broadcastChannel := make(chan raftstate.ProtobufMessage, 10)
-	raftState := raftstate.NewRaftState(broadcastChannel)
+	startNode(*node)
+
+	// startNode starts the grpc server asynchronously. But now need to keep the
+	// main goroutine alive or the process will die. So just use select to block
+	// forever
+	select {}
+}
+
+func startNode(myNode conf.Node) *RaftNode {
+	port := myNode.Port
+	address := fmt.Sprintf("localhost:%d", port)
+	log.Printf("startNode: attempting to bind to %v", address)
+	sock := utils.MustSucceed(net.Listen("tcp", address))
+	otherNodes := utils.Filter(conf.Nodes, func(node conf.Node) bool { return node.NodeId != myNode.NodeId })
+	otherNodeIds := utils.Map(otherNodes, func(node conf.Node) NodeId { return node.NodeId })
+
+	broadcastChannel := make(chan raftstate.OutboxMessage, 10)
+	raftState := raftstate.NewRaftState(broadcastChannel, otherNodeIds)
 
 	// TODO: once we have consensus working, can drop this startLeader stuff
-	if node.StartLeader {
+	if myNode.StartLeader {
 		raftState.BecomeLeader()
 	}
 
 	grpcServer := grpc.NewServer()
 
-	peerClients := make(map[NodeId]raftrpc.RaftClient)
-	for _, node := range conf.Nodes {
-		peerClients[node.NodeId] = raftrpc.MakeRpcClient(node.Port)
+	peerClients := make(map[NodeId]*raftrpc.RpcClient)
+	for _, node := range otherNodes {
+		peerClients[node.NodeId] = raftrpc.MakeRpcClient(node.NodeId, node.Port)
 	}
 
 	raftNode := &RaftNode{
+		Id:          myNode.NodeId,
 		GrpcServer:  grpcServer,
 		RaftState:   raftState,
 		PeerClients: peerClients,
@@ -65,20 +77,34 @@ func main() {
 	go raftNode.monitorBroadcastChannel()
 
 	log.Printf("GRPC server started, listening at %v", sock.Addr())
-	grpcServer.Serve(sock) // blocks while the server is running
+	// this blocks while the server is running, so run it in a goroutine so that
+	// we can return the RaftNode (mostly useful for testing)
+	go grpcServer.Serve(sock)
+	return raftNode
 
 }
 
 func (r *RaftNode) monitorBroadcastChannel() {
 	for {
 		msg := <-r.RaftState.BroadcastChan
-		method := msg.ProtoReflect().Descriptor().Name()
-		log.Printf("Got message on broadcast channel; method = %s", method)
+		method := msg.MsgType
 		switch method {
-		case "AppendEntriesRequest":
-			// TODO
-			for _, client := range r.PeerClients {
-				// resp, err := client.AppendEntriesRequest(ctx, &raftrpc.ClientLogAppendRequest{Item: "test item"})
+		case raftstate.AppendMsgType:
+			log.Println("Got appendEntriesRequest from broadcast channel; msg =", msg)
+			req := msg.Msg.(*raftrpc.AppendEntriesRequest)
+			for _, nodeId := range msg.Recipients {
+				client := r.PeerClients[nodeId]
+				go func(client *raftrpc.RpcClient) {
+					resp, err := client.SendAppendEntries(req)
+					if err != nil {
+						// Log a failure, and don't even bother to notify the raftstate,
+						// which does not rely on getting appendentriesresponses from
+						// everyone else in a reasonable amount of time, or indeed at all
+						log.Printf("Error sending AppendEntries rpc to node %v; err = %v", client.Address, err)
+					} else {
+						r.RaftState.HandleAppendEntriesResponse(req.PrevIndex, resp.Result, client.NodeId, int32(len(req.Entries)))
+					}
+				}(client)
 			}
 
 		default:

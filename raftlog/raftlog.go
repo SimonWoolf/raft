@@ -82,6 +82,10 @@ func (r *RaftLog) AppendEntries(prevIndex Index, prevTerm Term, newEntries []Log
 	return true
 }
 
+func (r *RaftLog) GetEntriesFrom(index Index) []LogEntry {
+	return r.Entries[index:]
+}
+
 func stringEntry(entry LogEntry) string {
 	return fmt.Sprintf("'%v' (%d)", entry.Item, entry.Term)
 }

@@ -15,6 +15,13 @@ func Min[T constraints.Ordered](a T, b T) T {
 	return b
 }
 
+func Max[T constraints.Ordered](a T, b T) T {
+	if a < b {
+		return b
+	}
+	return a
+}
+
 func Map[T, U any](slice []T, f func(T) U) []U {
 	us := make([]U, len(slice))
 	for i := range slice {

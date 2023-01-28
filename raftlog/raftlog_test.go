@@ -110,6 +110,14 @@ func TestFigSeven(t *testing.T) {
 	assert.False(t, logs[5].AppendEntries(9, 6, newEntries))
 }
 
+func TestGetEntries(t *testing.T) {
+	currentTerm := 3
+	length := 5
+	log := makeSimpleLog(length, currentTerm)
+	entries := log.GetEntriesFrom(2)
+	assert.Equal(t, 3, len(entries))
+}
+
 func makeSimpleLog(length int, currentTerm int) *RaftLog {
 	return addEntries(&RaftLog{}, []termSpec{{currentTerm, length}})
 }
