@@ -57,7 +57,7 @@ func (r *RpcClient) sendClientAppendImpl(msg string) (*MaybeErrorResponse, error
 	return r.client.ClientLogAppend(ctx, &ClientLogAppendRequest{Item: msg})
 }
 
-func (r *RpcClient) SendAppendEntries(req *AppendEntriesRequest) (*BoolResponse, error) {
+func (r *RpcClient) SendAppendEntries(req *AppendEntriesRequest) (*AppendEntriesResponse, error) {
 	ctx := context.Background()
 	return r.client.AppendEntries(ctx, req)
 }

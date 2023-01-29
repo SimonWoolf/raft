@@ -105,7 +105,7 @@ func (r *RaftNode) monitorBroadcastChannel() {
 						// everyone else in a reasonable amount of time, or indeed at all
 						log.Printf("Error sending AppendEntries rpc to node %v; err = %v", client.Address, err)
 					} else {
-						r.RaftState.HandleAppendEntriesResponse(req.PrevIndex, resp.Result, client.NodeId, int32(len(req.Entries)))
+						r.RaftState.HandleAppendEntriesResponse(req.PrevIndex, resp.Result, resp.Term, client.NodeId, int32(len(req.Entries)))
 					}
 				}(client)
 			}
@@ -116,10 +116,9 @@ func (r *RaftNode) monitorBroadcastChannel() {
 	}
 }
 
-func (r *RaftNode) AppendEntries(ctx context.Context, req *raftrpc.AppendEntriesRequest) (*raftrpc.BoolResponse, error) {
-	// TODO do we want to include a match index here? nah we can just get it from the req since grpc matches up requests and responses
-	result := r.RaftState.HandleAppendEntries(req)
-	return &raftrpc.BoolResponse{Result: result}, nil
+func (r *RaftNode) AppendEntries(ctx context.Context, req *raftrpc.AppendEntriesRequest) (*raftrpc.AppendEntriesResponse, error) {
+	result, currentTerm := r.RaftState.HandleAppendEntries(req)
+	return &raftrpc.AppendEntriesResponse{Result: result, Term: currentTerm}, nil
 }
 
 func (r *RaftNode) ClientLogAppend(ctx context.Context, req *raftrpc.ClientLogAppendRequest) (*raftrpc.MaybeErrorResponse, error) {

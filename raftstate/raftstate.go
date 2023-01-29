@@ -183,16 +183,28 @@ func (r *RaftState) HandleClientLogAppend(item string) (bool, error) {
 // When received by a follower, it uses append_entries() to carry out the
 // operation and responds with an AppendEntriesResponse message to indicate
 // success or failure.
-func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) bool {
-	currentState := utils.MustSucceed(r.statem.State(context.Background()))
-	if currentState != stateFollower {
-		log.Printf("Received append entries req from leader %d, but unable to handle as in state %v", req.LeaderId, currentState)
-		return false
+func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) (bool, Term) {
+	// If RPC request or response contains term T > currentTerm:
+	// set currentTerm = T, convert to follower (§5.1)
+	if req.Term > r.currentTerm {
+		r.currentTerm = req.Term
+		if r.IsLeader() {
+			log.Printf("Received append entries req as leader from someone (node %d) with a higher term (%d) than us; becoming a follower", req.LeaderId, req.Term)
+			r.statem.Fire(discoverHigherTerm)
+		} else if r.IsCandidate() {
+			log.Printf("Received append entries req as candidate from node (%d) with a higher term (%d) than us; becoming a follower", req.LeaderId, req.Term)
+			r.statem.Fire(discoverLeader)
+		}
+	}
+
+	if !r.IsFollower() {
+		log.Printf("Received append entries req from leader %d, but unable to handle as in state %v", req.LeaderId, utils.MustSucceed(r.statem.State(context.Background())))
+		return false, r.currentTerm
 	}
 
 	// 1. Reply false if term < currentTerm (§5.1)
 	if req.Term < r.currentTerm {
-		return false
+		return false, r.currentTerm
 	}
 
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex
@@ -213,15 +225,27 @@ func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) bool 
 
 	log.Printf("Handled append entries from leader %d; prevIndex = %v; prevTerm = %v; result = %v\n", req.LeaderId, req.PrevIndex, req.PrevTerm, appendRes)
 
-	return appendRes
+	return appendRes, r.currentTerm
 }
 
 // A message sent by a follower back to the Raft leader to indicate
 // success/failure of an earlier AppendEntries message. A failure tells the
 // leader to retry the AppendEntries with earlier log entries.
-func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, nodeId NodeId, numAppended Index) {
-	currentState := utils.MustSucceed(r.statem.State(context.Background()))
-	if currentState != stateLeader {
+func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, term Term, nodeId NodeId, numAppended Index) {
+	// If RPC request or response contains term T > currentTerm:
+	// set currentTerm = T, convert to follower (§5.1)
+	if term > r.currentTerm {
+		r.currentTerm = term
+		if r.IsLeader() {
+			log.Printf("Received append entries response from someone (node %d) with a higher term (%d) than us; becoming a follower", nodeId, term)
+			r.statem.Fire(discoverHigherTerm)
+		} else if r.IsCandidate() {
+			log.Printf("Received append entries resp candidate from node (%d) with a higher term (%d) than us; becoming a follower", nodeId, term)
+			r.statem.Fire(discoverLeader)
+		}
+	}
+
+	if !r.IsLeader() {
 		log.Printf("Ignoring append entries response from %v as we're no longer the leader", nodeId)
 		return
 	}
@@ -360,8 +384,26 @@ func (r *RaftState) BecomeLeader() {
 	}
 }
 
+func (r *RaftState) BecomeCandidate() {
+	currentState := utils.MustSucceed(r.statem.State(context.Background()))
+	if currentState == stateFollower {
+		r.statem.Fire(triggerElection)
+	} else if currentState == stateLeader {
+		r.statem.Fire(discoverHigherTerm)
+		r.statem.Fire(triggerElection)
+	}
+}
+
 func (r *RaftState) IsLeader() bool {
 	return utils.MustSucceed(r.statem.IsInState(stateLeader))
+}
+
+func (r *RaftState) IsFollower() bool {
+	return utils.MustSucceed(r.statem.IsInState(stateFollower))
+}
+
+func (r *RaftState) IsCandidate() bool {
+	return utils.MustSucceed(r.statem.IsInState(stateCandidate))
 }
 
 // includes uncommited entries

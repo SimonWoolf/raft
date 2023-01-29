@@ -24,11 +24,12 @@ message AppendEntriesRequest {
   int32             leaderCommit = 6;
 }
 
-message BoolResponse {
-  bool result = 1;
+message AppendEntriesResponse {
+  bool   result = 1;
+  int32  term   = 2;
 }
 
 service Raft {
-  rpc AppendEntries(AppendEntriesRequest)        returns (BoolResponse);
+  rpc AppendEntries(AppendEntriesRequest)        returns (AppendEntriesResponse);
   rpc ClientLogAppend(ClientLogAppendRequest)    returns (MaybeErrorResponse);
 }

@@ -1,7 +1,6 @@
 package raftstate
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"raft/raftlog"
@@ -21,14 +20,31 @@ func TestNoClientAppendWhenFollower(t *testing.T) {
 func TestNoAppendWhenNewerTerm(t *testing.T) {
 	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
 	r.currentTerm = 2
-	assert.False(t, r.HandleAppendEntries(
+	res, _ := r.HandleAppendEntries(
 		&raftrpc.AppendEntriesRequest{
-			Term:      Term(1),
-			PrevIndex: -1,
-			PrevTerm:  Term(-1),
-			Entries:   []*raftrpc.LogEntry{raftlog.MakeLogEntry(1, "some entry")},
+			Term:         Term(1),
+			PrevIndex:    -1,
+			PrevTerm:     Term(-1),
+			Entries:      []*raftrpc.LogEntry{raftlog.MakeLogEntry(1, "some entry")},
+			LeaderCommit: Index(-1),
 		},
-	))
+	)
+	assert.False(t, res)
+}
+
+func TestNoAppendWhenLeader(t *testing.T) {
+	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
+	r.BecomeLeader()
+	res, _ := r.HandleAppendEntries(
+		&raftrpc.AppendEntriesRequest{
+			Term:         Term(1),
+			PrevIndex:    -1,
+			PrevTerm:     Term(-1),
+			Entries:      []*raftrpc.LogEntry{raftlog.MakeLogEntry(1, "some entry")},
+			LeaderCommit: Index(-1),
+		},
+	)
+	assert.False(t, res)
 }
 
 // Checks which are only functions of the raftlog are tested more thoroughly in
@@ -36,26 +52,32 @@ func TestNoAppendWhenNewerTerm(t *testing.T) {
 // integration.
 func TestNoAppendWhenNoPreviousItem(t *testing.T) {
 	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
-	assert.False(t, r.HandleAppendEntries(
+	res, _ := r.HandleAppendEntries(
 		&raftrpc.AppendEntriesRequest{
-			Term:      Term(1),
-			PrevIndex: 3,
-			PrevTerm:  Term(1),
-			Entries:   []*raftrpc.LogEntry{raftlog.MakeLogEntry(1, "some entry")},
+			Term:         Term(1),
+			PrevIndex:    3,
+			PrevTerm:     Term(1),
+			Entries:      []*raftrpc.LogEntry{raftlog.MakeLogEntry(1, "some entry")},
+			LeaderCommit: Index(-1),
 		},
-	))
+	)
+	assert.False(t, res)
 }
 
 func TestAppendCanSucceed(t *testing.T) {
 	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
-	assert.True(t, r.HandleAppendEntries(
+	// default to follower
+	assert.True(t, r.IsFollower())
+	res, _ := r.HandleAppendEntries(
 		&raftrpc.AppendEntriesRequest{
-			Term:      Term(1),
-			PrevIndex: -1,
-			PrevTerm:  Term(-1),
-			Entries:   []*raftrpc.LogEntry{raftlog.MakeLogEntry(1, "some entry")},
+			Term:         Term(1),
+			PrevIndex:    -1,
+			PrevTerm:     Term(-1),
+			Entries:      []*raftrpc.LogEntry{raftlog.MakeLogEntry(1, "some entry")},
+			LeaderCommit: Index(-1),
 		},
-	))
+	)
+	assert.True(t, res)
 }
 
 func TestAppendResponseMajoritySuccess(t *testing.T) {
@@ -89,6 +111,53 @@ func TestAppendResponseMajorityFailure(t *testing.T) {
 	assert.EqualValues(t, -1, r.lastApplied)
 }
 
+func TestDiscoverHigherTermAsLeaderFromAppend(t *testing.T) {
+	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
+	r.BecomeLeader()
+	res, newTerm := r.HandleAppendEntries(
+		&raftrpc.AppendEntriesRequest{
+			Term:         Term(2),
+			PrevIndex:    -1,
+			PrevTerm:     Term(-1),
+			Entries:      []*raftrpc.LogEntry{raftlog.MakeLogEntry(1, "some entry")},
+			LeaderCommit: Index(-1),
+		},
+	)
+	assert.True(t, res)
+	assert.True(t, r.IsFollower())
+	assert.Equal(t, newTerm, Term(2))
+	// Check the log was successfully appended
+	assert.Equal(t, 1, len(r.log.Entries))
+}
+
+func TestDiscoverHigherTermAsLeaderFromAppendResponse(t *testing.T) {
+	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
+	r.BecomeLeader()
+	r.HandleAppendEntriesResponse(-1, false, Term(2), 1, 0)
+	// We should have become a follower
+	assert.True(t, r.IsFollower())
+	assert.Equal(t, r.currentTerm, Term(2))
+}
+
+func TestDiscoverNewLeaderAsCandidate(t *testing.T) {
+	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
+	r.BecomeCandidate()
+	res, newTerm := r.HandleAppendEntries(
+		&raftrpc.AppendEntriesRequest{
+			Term:         Term(2),
+			PrevIndex:    -1,
+			PrevTerm:     Term(-1),
+			Entries:      []*raftrpc.LogEntry{raftlog.MakeLogEntry(1, "some entry")},
+			LeaderCommit: Index(-1),
+		},
+	)
+	assert.True(t, r.IsFollower())
+	assert.True(t, res)
+	assert.Equal(t, newTerm, Term(2))
+	// Check the log was successfully appended
+	assert.Equal(t, 1, len(r.log.Entries))
+}
+
 func setUpEmptyLeader(t *testing.T) *RaftState {
 	broadcastChan := make(chan OutboxMessage, 10)
 	r := NewRaftState(broadcastChan, make(chan string, 10), []NodeId{1, 2, 3, 4})
@@ -96,9 +165,7 @@ func setUpEmptyLeader(t *testing.T) *RaftState {
 	// put into the leader state
 	r.statem.Fire(triggerElection)
 	r.statem.Fire(winElection)
-	state, err := r.statem.State(context.Background())
-	assert.Nil(t, err)
-	assert.Equal(t, stateLeader, state)
+	assert.True(t, r.IsLeader())
 
 	return r
 }
@@ -118,10 +185,10 @@ func mockResponses(r *RaftState, prevIndex Index, numFailures int, numSuccesses 
 			}
 			i := 0
 			for ; i < numFailures; i++ {
-				r.HandleAppendEntriesResponse(prevIndex, false, i, numAppended)
+				r.HandleAppendEntriesResponse(prevIndex, false, 1, i, numAppended)
 			}
 			for ; i < numSuccesses+numFailures; i++ {
-				r.HandleAppendEntriesResponse(prevIndex, true, i, numAppended)
+				r.HandleAppendEntriesResponse(prevIndex, true, 1, i, numAppended)
 			}
 
 		default:
