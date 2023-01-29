@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"raft/conf"
 	"raft/raftrpc"
 	"raft/utils"
@@ -20,7 +21,7 @@ func TestFiveNodeFarm(t *testing.T) {
 		// Also note that the nodes may not have started up by the time this
 		// returns. That's fine -- the raft protocol should be able to handle it.
 		resp := client.SendClientAppend("set x 10")
-		assert.True(t, resp.Result)
+		assert.Equal(t, "ok", resp.Response)
 		assert.Empty(t, resp.Error)
 
 		// Expect at least three of five nodes to have it in their log by the time the client responds
@@ -37,7 +38,7 @@ func TestFiveNodeFarm(t *testing.T) {
 		leader := *utils.Find(nodes, func(n *RaftNode) bool {
 			return n.RaftState.IsLeader()
 		})
-		item := <-leader.SmApplyChan
-		assert.Equal(t, "set x 10", item)
+		res := leader.RaftState.ApplicationSM.Apply("get x")
+		assert.Equal(t, "ok 10", res)
 	})
 }

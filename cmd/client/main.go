@@ -26,6 +26,6 @@ func runInputLoop(grpcClient *raftrpc.RpcClient) {
 		msg := utils.MustSucceed(stdinReader.ReadString('\n'))
 		msg = strings.TrimSpace(msg) + "\n"
 		resp := grpcClient.SendClientAppend(msg)
-		log.Printf("Response: %v (err was %v)\n", resp.Result, resp.Error)
+		log.Printf("Response: %v (err was %v)\n", resp.Response, resp.Error)
 	}
 }

@@ -22,7 +22,6 @@ type RaftNode struct {
 	RaftState   *raftstate.RaftState
 	Id          NodeId
 	PeerClients map[NodeId]*raftrpc.RpcClient
-	SmApplyChan chan string
 }
 
 func main() {
@@ -53,8 +52,12 @@ func startNode(myNode conf.Node) *RaftNode {
 	otherNodeIds := utils.Map(otherNodes, func(node conf.Node) NodeId { return node.NodeId })
 
 	broadcastChannel := make(chan raftstate.OutboxMessage, 10)
-	smApplyChan := make(chan string, 10)
-	raftState := raftstate.NewRaftState(broadcastChannel, smApplyChan, otherNodeIds)
+	// The actual application, which here is a simple key/value server. We pass
+	// it the state-machine apply channel, and then forget about it. That's the
+	// only point of communication, and it's one-way.
+	applicationStateMachine := // TODO
+
+	raftState := raftstate.NewRaftState(broadcastChannel, applicationStateMachine, otherNodeIds)
 
 	// TODO: once we have consensus working, can drop this startLeader stuff
 	if myNode.StartLeader {
@@ -73,7 +76,6 @@ func startNode(myNode conf.Node) *RaftNode {
 		GrpcServer:  grpcServer,
 		RaftState:   raftState,
 		PeerClients: peerClients,
-		SmApplyChan: smApplyChan,
 	}
 	raftrpc.RegisterRaftServer(grpcServer, raftNode)
 
@@ -121,15 +123,15 @@ func (r *RaftNode) AppendEntries(ctx context.Context, req *raftrpc.AppendEntries
 	return &raftrpc.AppendEntriesResponse{Result: result, Term: currentTerm}, nil
 }
 
-func (r *RaftNode) ClientLogAppend(ctx context.Context, req *raftrpc.ClientLogAppendRequest) (*raftrpc.MaybeErrorResponse, error) {
+func (r *RaftNode) ClientLogAppend(ctx context.Context, req *raftrpc.ClientLogAppendRequest) (*raftrpc.ClientLogAppendResponse, error) {
 	log.Printf("Server received client log append req")
 	// This is blocking, but no need to spawn off a goroutine cause each grpc req
 	// is already handled in one
-	result, error := r.RaftState.HandleClientLogAppend(req.Item)
+	response, error := r.RaftState.HandleClientLogAppend(req.Item)
 	if error == nil {
 		// Is this the point here that we actually apply the command to the KV store, as a leader? what about as a follower?
-		return &raftrpc.MaybeErrorResponse{Result: result, Error: ""}, nil
+		return &raftrpc.ClientLogAppendResponse{Response: response, Error: ""}, nil
 	} else {
-		return &raftrpc.MaybeErrorResponse{Result: result, Error: error.Error()}, nil
+		return &raftrpc.ClientLogAppendResponse{Response: response, Error: error.Error()}, nil
 	}
 }

@@ -11,14 +11,13 @@ import (
 )
 
 func TestNoClientAppendWhenFollower(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
-	res, err := r.HandleClientLogAppend("item")
-	assert.False(t, res)
+	r := NewRaftState(make(chan OutboxMessage), MockAppSm{}, []NodeId{})
+	_, err := r.HandleClientLogAppend("item")
 	assert.NotNil(t, err)
 }
 
 func TestNoAppendWhenNewerTerm(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
+	r := NewRaftState(make(chan OutboxMessage), MockAppSm{}, []NodeId{})
 	r.currentTerm = 2
 	res, _ := r.HandleAppendEntries(
 		&raftrpc.AppendEntriesRequest{
@@ -33,7 +32,7 @@ func TestNoAppendWhenNewerTerm(t *testing.T) {
 }
 
 func TestNoAppendWhenLeader(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
+	r := NewRaftState(make(chan OutboxMessage), MockAppSm{}, []NodeId{})
 	r.BecomeLeader()
 	res, _ := r.HandleAppendEntries(
 		&raftrpc.AppendEntriesRequest{
@@ -51,7 +50,7 @@ func TestNoAppendWhenLeader(t *testing.T) {
 // raftlog_test. Here we check one failure and one success case to check the
 // integration.
 func TestNoAppendWhenNoPreviousItem(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
+	r := NewRaftState(make(chan OutboxMessage), MockAppSm{}, []NodeId{})
 	res, _ := r.HandleAppendEntries(
 		&raftrpc.AppendEntriesRequest{
 			Term:         Term(1),
@@ -65,7 +64,7 @@ func TestNoAppendWhenNoPreviousItem(t *testing.T) {
 }
 
 func TestAppendCanSucceed(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
+	r := NewRaftState(make(chan OutboxMessage), MockAppSm{}, []NodeId{})
 	// default to follower
 	assert.True(t, r.IsFollower())
 	res, _ := r.HandleAppendEntries(
@@ -91,28 +90,31 @@ func TestAppendResponseMajoritySuccess(t *testing.T) {
 
 	// send it a request
 	res, err := r.HandleClientLogAppend("item")
-	assert.True(t, res)
+	assert.Equal(t, "success", res)
 	assert.Nil(t, err)
 	assert.EqualValues(t, 0, r.commitIndex)
 	assert.EqualValues(t, 0, r.lastApplied)
 }
 
-func TestAppendResponseMajorityFailure(t *testing.T) {
-	r := setUpEmptyLeader(t)
+// Commented out because after the 'no more per-client-req response list'
+// refactor, a majority failure just causes the request to hang indefinitely
+// while it keeps retrying, it never actually returns to the client. TODO think
+// of a way to test this
+// func TestAppendResponseMajorityFailure(t *testing.T) {
+//   r := setUpEmptyLeader(t)
 
-	// mock a success response from the majority of other servers
-	go mockResponses(r, Index(-1), 3, 1, 1)
+//   // mock a success response from the majority of other servers
+//   go mockResponses(r, Index(-1), 3, 1, 1)
 
-	// send it a request
-	res, err := r.HandleClientLogAppend("item")
-	assert.False(t, res)
-	assert.NotNil(t, err)
-	assert.EqualValues(t, -1, r.commitIndex)
-	assert.EqualValues(t, -1, r.lastApplied)
-}
+//   // send it a request
+//   _, err := r.HandleClientLogAppend("item")
+//   assert.NotNil(t, err)
+//   assert.EqualValues(t, -1, r.commitIndex)
+//   assert.EqualValues(t, -1, r.lastApplied)
+// }
 
 func TestDiscoverHigherTermAsLeaderFromAppend(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
+	r := NewRaftState(make(chan OutboxMessage), MockAppSm{}, []NodeId{})
 	r.BecomeLeader()
 	res, newTerm := r.HandleAppendEntries(
 		&raftrpc.AppendEntriesRequest{
@@ -131,7 +133,7 @@ func TestDiscoverHigherTermAsLeaderFromAppend(t *testing.T) {
 }
 
 func TestDiscoverHigherTermAsLeaderFromAppendResponse(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
+	r := NewRaftState(make(chan OutboxMessage), MockAppSm{}, []NodeId{})
 	r.BecomeLeader()
 	r.HandleAppendEntriesResponse(-1, false, Term(2), 1, 0)
 	// We should have become a follower
@@ -140,7 +142,7 @@ func TestDiscoverHigherTermAsLeaderFromAppendResponse(t *testing.T) {
 }
 
 func TestDiscoverNewLeaderAsCandidate(t *testing.T) {
-	r := NewRaftState(make(chan OutboxMessage), make(chan string), []NodeId{})
+	r := NewRaftState(make(chan OutboxMessage), MockAppSm{}, []NodeId{})
 	r.BecomeCandidate()
 	res, newTerm := r.HandleAppendEntries(
 		&raftrpc.AppendEntriesRequest{
@@ -160,7 +162,7 @@ func TestDiscoverNewLeaderAsCandidate(t *testing.T) {
 
 func setUpEmptyLeader(t *testing.T) *RaftState {
 	broadcastChan := make(chan OutboxMessage, 10)
-	r := NewRaftState(broadcastChan, make(chan string, 10), []NodeId{1, 2, 3, 4})
+	r := NewRaftState(broadcastChan, MockAppSm{}, []NodeId{1, 2, 3, 4})
 
 	// put into the leader state
 	r.statem.Fire(triggerElection)
@@ -195,4 +197,10 @@ func mockResponses(r *RaftState, prevIndex Index, numFailures int, numSuccesses 
 			panic(fmt.Sprintf("Unhandled message type %v", method))
 		}
 	}
+}
+
+type MockAppSm struct{}
+
+func (m MockAppSm) Apply(item string) string {
+	return "success"
 }

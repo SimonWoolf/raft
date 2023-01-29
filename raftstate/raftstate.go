@@ -13,6 +13,13 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
+type ApplicationStateMachine interface {
+	// In general, the ApplicationStateMachine can block on Apply. Our KV server
+	// happen so not, but the raft state should be able to cope with Apply taking
+	// a while.
+	Apply(item string) string
+}
+
 // states
 const (
 	stateFollower  = "Follower"
@@ -49,32 +56,27 @@ const (
 
 type OutboxMessage struct {
 	Msg        ProtobufMessage
-	MsgType    BroadcastMsgType // obligatory grumble at the lack of proper tagged unions
+	MsgType    BroadcastMsgType // obligatory grumble at the lack aaof proper tagged unions
 	Recipients []NodeId
 }
 
-type PendingClientReq struct {
-	ResultChannel chan error
-	Responses     *[clusterSize]*bool // use pointer to bool as a crude
-	// Maybe[bool], so we can distinguish no reply yet from false reply
-}
+type ClientResponseMessage = string
 
 type RaftState struct {
 	log           *raftlog.RaftLog
 	statem        *stateless.StateMachine
 	currentTerm   Term
 	BroadcastChan chan OutboxMessage
-	SmApplyChan   chan string // channel for items to apply to the state machine
+	ApplicationSM ApplicationStateMachine
 	otherNodeIds  []NodeId
 
-	// indexed by prevIndex. Note that a request can continue to be pending while
-	// the leader goes back and forth with a follower, backfilling earlier
-	// indices; it will be fulfilled when it reaches the current one. We don't
-	// keep pendingClientReqs for the backfills, only when there's someone waiting
-	// on the result
-	pendingClientReqs map[Index]PendingClientReq
-
 	//=== Volatile leader state ===
+
+	// indexed by prevIndex; channels to send the result of the state machine
+	// application to. Could put these response channels in the RaftLog together
+	// with the items they apply to, but it seems neater to keep them separate in
+	// state that's cleared when we stop becoming the leader
+	pendingClientReqs map[Index](chan ClientResponseMessage)
 
 	// for each server, index of the next log entry to send to that server
 	// (initialized to leader last log index + 1)
@@ -96,7 +98,7 @@ type RaftState struct {
 	lastApplied Index
 }
 
-func NewRaftState(broadcastChan chan OutboxMessage, smApplyChan chan string, otherNodeIds []NodeId) *RaftState {
+func NewRaftState(broadcastChan chan OutboxMessage, applicationSM ApplicationStateMachine, otherNodeIds []NodeId) *RaftState {
 	// First configure the state machine
 	statem := stateless.NewStateMachine(stateFollower)
 
@@ -122,14 +124,14 @@ func NewRaftState(broadcastChan chan OutboxMessage, smApplyChan chan string, oth
 		log:               &raftlog.RaftLog{},
 		statem:            statem,
 		currentTerm:       1,
-		pendingClientReqs: make(map[Index]PendingClientReq),
+		pendingClientReqs: make(map[Index](chan ClientResponseMessage)),
 		BroadcastChan:     broadcastChan,
 		matchIndices:      matchIndices,
 		nextIndices:       nextIndices,
 		otherNodeIds:      otherNodeIds,
 		commitIndex:       -1,
 		lastApplied:       -1,
-		SmApplyChan:       smApplyChan,
+		ApplicationSM:     applicationSM,
 	}
 }
 
@@ -137,10 +139,10 @@ func NewRaftState(broadcastChan chan OutboxMessage, smApplyChan chan string, oth
 // to the leader. The leader should take the new entry and use
 // append_entries() to add it to its own log. This is how new log entries get
 // added to a Raft cluster.
-func (r *RaftState) HandleClientLogAppend(item string) (bool, error) {
+func (r *RaftState) HandleClientLogAppend(item string) (string, error) {
 	currentState := utils.MustSucceed(r.statem.State(context.Background()))
 	if currentState != stateLeader {
-		return false, errors.New("Only the leader can handle client requests")
+		return "", errors.New("Only the leader can handle client requests")
 	}
 
 	entry := raftlog.MakeLogEntry(int(r.currentTerm), item)
@@ -157,11 +159,9 @@ func (r *RaftState) HandleClientLogAppend(item string) (bool, error) {
 	// Send the update to all our followers in parallel. Wait until we have
 	// replies from the majority (nil error implies success), then reply to the
 	// client.
-	resultChan := make(chan error, 1)
-	r.pendingClientReqs[prevIndex] = PendingClientReq{
-		ResultChannel: resultChan,
-		Responses:     &[clusterSize]*bool{},
-	}
+	// TODO does this need to be buffered at all?
+	resultChan := make(chan ClientResponseMessage, 1)
+	r.pendingClientReqs[prevIndex+1] = resultChan
 
 	r.BroadcastChan <- OutboxMessage{
 		Msg: &raftrpc.AppendEntriesRequest{
@@ -174,8 +174,10 @@ func (r *RaftState) HandleClientLogAppend(item string) (bool, error) {
 		Recipients: r.otherNodeIds,
 	}
 
-	err := <-resultChan
-	return err == nil, err
+	log.Printf("Awaiting response for index %v\n", prevIndex+1)
+	clientResponse := <-resultChan
+	log.Printf("Got response for index %v; replying to client\n", prevIndex+1)
+	return clientResponse, nil
 }
 
 // A message sent by the Raft leader to a follower. This
@@ -306,38 +308,6 @@ func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, t
 		// test purposes)
 		log.Printf("Append entries response for a request containing the complete log unexpectedly failed; nodeId = %v", nodeId)
 	}
-
-	// Update any pending requests for any of the indices we've replicated
-	for i := prevIndex; i < prevIndex+numAppended; i++ {
-		pendingReq, exists := r.pendingClientReqs[i]
-		if !exists {
-			// eg for a req that we've already responded to, say because we've heard a
-			// success from the majority
-			log.Printf("Ignoring append entries response for index = %v with no corresponding pending client request (but success = %v; nodeIndex = %v)", i, success, nodeId)
-			return
-		}
-		pendingReq.Responses[nodeId] = &success
-
-		numReplies, numSuccesses := 0, 0
-		for _, v := range pendingReq.Responses {
-			if v != nil {
-				numReplies++
-				if *v == true {
-					numSuccesses++
-				}
-			}
-		}
-
-		log.Printf("Handling append entries response; prevIndex = %v; success = %v; nodeIndex = %v; numSuccesses = %v; numReplies = %v\n", prevIndex, success, nodeId, numSuccesses, numReplies)
-
-		if numSuccesses >= repliesForMajority {
-			pendingReq.ResultChannel <- nil
-			delete(r.pendingClientReqs, prevIndex)
-		} else if numReplies >= clusterSize-1 {
-			pendingReq.ResultChannel <- errors.New("Unsuccessful result from a majority of nodes")
-			delete(r.pendingClientReqs, prevIndex)
-		}
-	}
 }
 
 // Should be called immediately on the leader after anything mutates matchIndices
@@ -367,9 +337,16 @@ func (r *RaftState) updateStateMachine() {
 	// log[lastApplied] to state machine (§5.3)
 	if r.commitIndex > r.lastApplied {
 		r.lastApplied++
-		log.Printf("Sending item with index %v to state machine", r.lastApplied)
 		item := r.log.Entries[r.lastApplied].Item
-		r.SmApplyChan <- item
+		log.Printf("Sending item with index %v to state machine; item = '%s'", r.lastApplied, item)
+		// In general the applicationStateMachine can block on apply
+		result := r.ApplicationSM.Apply(item)
+		log.Printf("Got result '%s' from state machine", result)
+		resultChan, exists := r.pendingClientReqs[r.lastApplied]
+		if exists {
+			delete(r.pendingClientReqs, r.lastApplied)
+			resultChan <- result
+		}
 		// repeat until lastApplied is caught up
 		r.updateStateMachine()
 	}

@@ -36,7 +36,7 @@ func MakeRpcClient(nodeId int, port int) *RpcClient {
 	}
 }
 
-func (r *RpcClient) SendClientAppend(msg string) *MaybeErrorResponse {
+func (r *RpcClient) SendClientAppend(msg string) *ClientLogAppendResponse {
 	// retry network errors up to three times
 	// TODO idempotency for client requests; request id?
 	for i := 1; i <= 3; i++ {
@@ -51,7 +51,7 @@ func (r *RpcClient) SendClientAppend(msg string) *MaybeErrorResponse {
 	return nil
 }
 
-func (r *RpcClient) sendClientAppendImpl(msg string) (*MaybeErrorResponse, error) {
+func (r *RpcClient) sendClientAppendImpl(msg string) (*ClientLogAppendResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return r.client.ClientLogAppend(ctx, &ClientLogAppendRequest{Item: msg})

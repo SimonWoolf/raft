@@ -23,7 +23,7 @@ const _ = grpc.SupportPackageIsVersion7
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type RaftClient interface {
 	AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
-	ClientLogAppend(ctx context.Context, in *ClientLogAppendRequest, opts ...grpc.CallOption) (*MaybeErrorResponse, error)
+	ClientLogAppend(ctx context.Context, in *ClientLogAppendRequest, opts ...grpc.CallOption) (*ClientLogAppendResponse, error)
 }
 
 type raftClient struct {
@@ -43,8 +43,8 @@ func (c *raftClient) AppendEntries(ctx context.Context, in *AppendEntriesRequest
 	return out, nil
 }
 
-func (c *raftClient) ClientLogAppend(ctx context.Context, in *ClientLogAppendRequest, opts ...grpc.CallOption) (*MaybeErrorResponse, error) {
-	out := new(MaybeErrorResponse)
+func (c *raftClient) ClientLogAppend(ctx context.Context, in *ClientLogAppendRequest, opts ...grpc.CallOption) (*ClientLogAppendResponse, error) {
+	out := new(ClientLogAppendResponse)
 	err := c.cc.Invoke(ctx, "/Raft/ClientLogAppend", in, out, opts...)
 	if err != nil {
 		return nil, err
@@ -57,7 +57,7 @@ func (c *raftClient) ClientLogAppend(ctx context.Context, in *ClientLogAppendReq
 // for forward compatibility
 type RaftServer interface {
 	AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error)
-	ClientLogAppend(context.Context, *ClientLogAppendRequest) (*MaybeErrorResponse, error)
+	ClientLogAppend(context.Context, *ClientLogAppendRequest) (*ClientLogAppendResponse, error)
 	mustEmbedUnimplementedRaftServer()
 }
 
@@ -68,7 +68,7 @@ type UnimplementedRaftServer struct {
 func (UnimplementedRaftServer) AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AppendEntries not implemented")
 }
-func (UnimplementedRaftServer) ClientLogAppend(context.Context, *ClientLogAppendRequest) (*MaybeErrorResponse, error) {
+func (UnimplementedRaftServer) ClientLogAppend(context.Context, *ClientLogAppendRequest) (*ClientLogAppendResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ClientLogAppend not implemented")
 }
 func (UnimplementedRaftServer) mustEmbedUnimplementedRaftServer() {}

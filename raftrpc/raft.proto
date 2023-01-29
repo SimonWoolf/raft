@@ -10,9 +10,9 @@ message ClientLogAppendRequest {
   string item = 1;
 }
 
-message MaybeErrorResponse {
-  bool   result = 1;
-  string error  = 2;
+message ClientLogAppendResponse {
+  string response = 1;
+  string error    = 2; // Errors other than responses from the application state machine
 }
 
 message AppendEntriesRequest {
@@ -31,5 +31,5 @@ message AppendEntriesResponse {
 
 service Raft {
   rpc AppendEntries(AppendEntriesRequest)        returns (AppendEntriesResponse);
-  rpc ClientLogAppend(ClientLogAppendRequest)    returns (MaybeErrorResponse);
+  rpc ClientLogAppend(ClientLogAppendRequest)    returns (ClientLogAppendResponse);
 }
