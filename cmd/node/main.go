@@ -58,7 +58,10 @@ func startNode(myNode conf.Node) *RaftNode {
 	// only point of communication, and it's one-way.
 	applicationStateMachine := kvserver.NewKvServer()
 
+	// raftState uses a goroutine to serialise edits to its internal state. Start
+	// it and leave it running
 	raftState := raftstate.NewRaftState(broadcastChannel, applicationStateMachine, otherNodeIds)
+	go raftState.Run()
 
 	// TODO: once we have consensus working, can drop this startLeader stuff
 	if myNode.StartLeader {
@@ -108,7 +111,7 @@ func (r *RaftNode) monitorBroadcastChannel() {
 						// everyone else in a reasonable amount of time, or indeed at all
 						log.Printf("Error sending AppendEntries rpc to node %v; err = %v", client.Address, err)
 					} else {
-						r.RaftState.HandleAppendEntriesResponse(req.PrevIndex, resp.Result, resp.Term, client.NodeId, int32(len(req.Entries)))
+						r.RaftState.NoteEntryAppended(req.PrevIndex, resp.Result, resp.Term, client.NodeId, int32(len(req.Entries)))
 					}
 				}(client)
 			}
@@ -119,20 +122,14 @@ func (r *RaftNode) monitorBroadcastChannel() {
 	}
 }
 
+// Protobuf Raft service method implementations
+
 func (r *RaftNode) AppendEntries(ctx context.Context, req *raftrpc.AppendEntriesRequest) (*raftrpc.AppendEntriesResponse, error) {
-	result, currentTerm := r.RaftState.HandleAppendEntries(req)
-	return &raftrpc.AppendEntriesResponse{Result: result, Term: currentTerm}, nil
+	log.Printf("Server received append entries req: %v\n", req)
+	return r.RaftState.AppendEntries(req), nil
 }
 
 func (r *RaftNode) ClientLogAppend(ctx context.Context, req *raftrpc.ClientLogAppendRequest) (*raftrpc.ClientLogAppendResponse, error) {
-	log.Printf("Server received client log append req")
-	// This is blocking, but no need to spawn off a goroutine cause each grpc req
-	// is already handled in one
-	response, error := r.RaftState.HandleClientLogAppend(req.Item)
-	if error == nil {
-		// Is this the point here that we actually apply the command to the KV store, as a leader? what about as a follower?
-		return &raftrpc.ClientLogAppendResponse{Response: response, Error: ""}, nil
-	} else {
-		return &raftrpc.ClientLogAppendResponse{Response: response, Error: error.Error()}, nil
-	}
+	log.Printf("Server received client log append req: %v\n", req)
+	return r.RaftState.ClientLogAppend(req), nil
 }

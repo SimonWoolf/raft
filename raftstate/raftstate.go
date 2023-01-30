@@ -2,11 +2,11 @@ package raftstate
 
 import (
 	"context"
-	"errors"
 	"log"
 	"raft/raftlog"
 	"raft/raftrpc"
-	"raft/utils"
+	rpc "raft/raftrpc"
+	. "raft/utils"
 
 	"github.com/qmuntal/stateless"
 	"golang.org/x/exp/maps"
@@ -50,17 +50,33 @@ type ProtobufMessage interface {
 
 type BroadcastMsgType string
 
+type EntryAppendedNote struct {
+	PrevIndex   Index
+	Success     bool
+	Term        Term
+	NodeId      NodeId
+	NumAppended int32
+}
+
 const (
 	AppendMsgType BroadcastMsgType = "AppendEntries"
 )
 
 type OutboxMessage struct {
 	Msg        ProtobufMessage
-	MsgType    BroadcastMsgType // obligatory grumble at the lack aaof proper tagged unions
+	MsgType    BroadcastMsgType // obligatory grumble at the lack of proper tagged unions
 	Recipients []NodeId
 }
 
-type ClientResponseMessage = string
+type clientLogAppendCall struct {
+	Request      *rpc.ClientLogAppendRequest
+	ResponseChan chan *rpc.ClientLogAppendResponse
+}
+
+type appendEntriesCall struct {
+	Request      *rpc.AppendEntriesRequest
+	ResponseChan chan *rpc.AppendEntriesResponse
+}
 
 type RaftState struct {
 	log           *raftlog.RaftLog
@@ -70,13 +86,18 @@ type RaftState struct {
 	ApplicationSM ApplicationStateMachine
 	otherNodeIds  []NodeId
 
+	// Internal call/cast channels
+	clientLogAppendChan   chan clientLogAppendCall
+	appendEntriesChan     chan appendEntriesCall
+	noteEntryAppendedChan chan EntryAppendedNote
+
 	//=== Volatile leader state ===
 
 	// indexed by prevIndex; channels to send the result of the state machine
 	// application to. Could put these response channels in the RaftLog together
 	// with the items they apply to, but it seems neater to keep them separate in
 	// state that's cleared when we stop becoming the leader
-	pendingClientReqs map[Index](chan ClientResponseMessage)
+	pendingClientReqs map[Index](chan *rpc.ClientLogAppendResponse)
 
 	// for each server, index of the next log entry to send to that server
 	// (initialized to leader last log index + 1)
@@ -97,6 +118,10 @@ type RaftState struct {
 	// [actually -1, see matchIndices], increases monotonically)
 	lastApplied Index
 }
+
+//============//
+// PUBLIC API //
+//============//
 
 func NewRaftState(broadcastChan chan OutboxMessage, applicationSM ApplicationStateMachine, otherNodeIds []NodeId) *RaftState {
 	// First configure the state machine
@@ -121,17 +146,20 @@ func NewRaftState(broadcastChan chan OutboxMessage, applicationSM ApplicationSta
 	}
 
 	return &RaftState{
-		log:               &raftlog.RaftLog{},
-		statem:            statem,
-		currentTerm:       1,
-		pendingClientReqs: make(map[Index](chan ClientResponseMessage)),
-		BroadcastChan:     broadcastChan,
-		matchIndices:      matchIndices,
-		nextIndices:       nextIndices,
-		otherNodeIds:      otherNodeIds,
-		commitIndex:       -1,
-		lastApplied:       -1,
-		ApplicationSM:     applicationSM,
+		log:                   &raftlog.RaftLog{},
+		statem:                statem,
+		currentTerm:           1,
+		pendingClientReqs:     make(map[Index](chan *rpc.ClientLogAppendResponse)),
+		BroadcastChan:         broadcastChan,
+		matchIndices:          matchIndices,
+		nextIndices:           nextIndices,
+		otherNodeIds:          otherNodeIds,
+		commitIndex:           -1,
+		lastApplied:           -1,
+		ApplicationSM:         applicationSM,
+		clientLogAppendChan:   make(chan clientLogAppendCall),
+		appendEntriesChan:     make(chan appendEntriesCall),
+		noteEntryAppendedChan: make(chan EntryAppendedNote),
 	}
 }
 
@@ -139,13 +167,66 @@ func NewRaftState(broadcastChan chan OutboxMessage, applicationSM ApplicationSta
 // to the leader. The leader should take the new entry and use
 // append_entries() to add it to its own log. This is how new log entries get
 // added to a Raft cluster.
-func (r *RaftState) HandleClientLogAppend(item string) (string, error) {
-	currentState := utils.MustSucceed(r.statem.State(context.Background()))
+func (r *RaftState) ClientLogAppend(req *rpc.ClientLogAppendRequest) *rpc.ClientLogAppendResponse {
+	replyChan := make(chan *rpc.ClientLogAppendResponse)
+	r.clientLogAppendChan <- clientLogAppendCall{req, replyChan}
+	return <-replyChan
+}
+
+// A message sent by the Raft leader to a follower. This message contains log
+// entries that should be added to the follower log. When received by a
+// follower, it uses append_entries() to carry out the operation and responds
+// with an AppendEntriesResponse message to indicate success or failure.
+func (r *RaftState) AppendEntries(req *rpc.AppendEntriesRequest) *rpc.AppendEntriesResponse {
+	replyChan := make(chan *rpc.AppendEntriesResponse)
+	r.appendEntriesChan <- appendEntriesCall{req, replyChan}
+	return <-replyChan
+}
+
+// A message sent by a follower back to the Raft leader to indicate
+// success/failure of an earlier AppendEntries message. A failure tells the
+// leader to retry the AppendEntries with earlier log entries.
+func (r *RaftState) NoteEntryAppended(prevIndex Index, success bool, term Term, nodeId NodeId, numAppended int32) {
+
+	r.noteEntryAppendedChan <- EntryAppendedNote{prevIndex, success, term, nodeId, numAppended}
+}
+
+// The point of this is to (a) serialize all state mutation through the
+// goroutine running this routine, avoiding concurrent data access, and (b)
+// give RaftState a uniform, synchronous public api, that hides which methods
+// are sync or async. (In particular ClientLogAppend must be async, blocking on
+// the response lead to a deadlock as the raft state needs to process other
+// events (the EntryAppendedNotes from other nodes) before it can respond)
+func (r *RaftState) Run() {
+	for {
+		select {
+		case call := <-r.clientLogAppendChan:
+			r.handleClientLogAppendCall(call.Request, call.ResponseChan)
+
+		case call := <-r.appendEntriesChan:
+			call.ResponseChan <- r.handleAppendEntriesCall(call.Request)
+
+		case cast := <-r.noteEntryAppendedChan:
+			r.handleNoteEntryAppendedCast(cast.PrevIndex, cast.Success, cast.Term, cast.NodeId, cast.NumAppended)
+		}
+	}
+}
+
+//==============//
+// PRIVATE IMPL //
+//=============//
+
+// A message sent by a follower back to the Raft leader to indicate
+// success/failure of an earlier AppendEntries message. A failure tells the
+// leader to retry the AppendEntries with earlier log entries.
+
+func (r *RaftState) handleClientLogAppendCall(req *rpc.ClientLogAppendRequest, responseChan chan *rpc.ClientLogAppendResponse) {
+	currentState := MustSucceed(r.statem.State(context.Background()))
 	if currentState != stateLeader {
-		return "", errors.New("Only the leader can handle client requests")
+		responseChan <- &rpc.ClientLogAppendResponse{Error: "Only the leader can handle client requests"}
 	}
 
-	entry := raftlog.MakeLogEntry(int(r.currentTerm), item)
+	entry := raftlog.MakeLogEntry(int(r.currentTerm), req.Item)
 	entries := []raftlog.LogEntry{entry}
 	prevIndex := Index(len(r.log.Entries) - 1)
 	var prevTerm Term = -1
@@ -154,38 +235,26 @@ func (r *RaftState) HandleClientLogAppend(item string) (string, error) {
 	}
 	r.log.AppendEntries(prevIndex, prevTerm, entries)
 
-	log.Printf("Handling client log append; prevIndex = %v; prevTerm = %v; item = %s\n", prevIndex, prevTerm, item)
+	log.Printf("Handling client log append; prevIndex = %v; prevTerm = %v; item = %s\n", prevIndex, prevTerm, req.Item)
 
 	// Send the update to all our followers in parallel. Wait until we have
 	// replies from the majority (nil error implies success), then reply to the
 	// client.
-	// TODO does this need to be buffered at all?
-	resultChan := make(chan ClientResponseMessage, 1)
-	r.pendingClientReqs[prevIndex+1] = resultChan
+	r.pendingClientReqs[prevIndex+1] = responseChan
 
 	r.BroadcastChan <- OutboxMessage{
-		Msg: &raftrpc.AppendEntriesRequest{
+		Msg: &rpc.AppendEntriesRequest{
 			Term:      Term(r.currentTerm),
 			PrevIndex: prevIndex,
 			PrevTerm:  prevTerm,
-			Entries:   []*raftrpc.LogEntry{entry},
+			Entries:   []*rpc.LogEntry{entry},
 		},
 		MsgType:    AppendMsgType,
 		Recipients: r.otherNodeIds,
 	}
-
-	log.Printf("Awaiting response for index %v\n", prevIndex+1)
-	clientResponse := <-resultChan
-	log.Printf("Got response for index %v; replying to client\n", prevIndex+1)
-	return clientResponse, nil
 }
 
-// A message sent by the Raft leader to a follower. This
-// message contains log entries that should be added to the follower log.
-// When received by a follower, it uses append_entries() to carry out the
-// operation and responds with an AppendEntriesResponse message to indicate
-// success or failure.
-func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) (bool, Term) {
+func (r *RaftState) handleAppendEntriesCall(req *rpc.AppendEntriesRequest) *rpc.AppendEntriesResponse {
 	// If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower (§5.1)
 	if req.Term > r.currentTerm {
@@ -200,13 +269,13 @@ func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) (bool
 	}
 
 	if !r.IsFollower() {
-		log.Printf("Received append entries req from leader %d, but unable to handle as in state %v", req.LeaderId, utils.MustSucceed(r.statem.State(context.Background())))
-		return false, r.currentTerm
+		log.Printf("Received append entries req from leader %d, but unable to handle as in state %v", req.LeaderId, MustSucceed(r.statem.State(context.Background())))
+		return &rpc.AppendEntriesResponse{Result: false, Term: r.currentTerm}
 	}
 
 	// 1. Reply false if term < currentTerm (§5.1)
 	if req.Term < r.currentTerm {
-		return false, r.currentTerm
+		return &rpc.AppendEntriesResponse{Result: false, Term: r.currentTerm}
 	}
 
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex
@@ -221,19 +290,16 @@ func (r *RaftState) HandleAppendEntries(req *raftrpc.AppendEntriesRequest) (bool
 	// 5. If leaderCommit > commitIndex, set commitIndex =
 	// min(leaderCommit, index of last new entry)
 	if appendRes && req.LeaderCommit > r.commitIndex {
-		r.commitIndex = utils.Min(req.LeaderCommit, req.PrevIndex+Index(len(req.Entries)))
+		r.commitIndex = Min(req.LeaderCommit, req.PrevIndex+Index(len(req.Entries)))
 		r.updateStateMachine()
 	}
 
 	log.Printf("Handled append entries from leader %d; prevIndex = %v; prevTerm = %v; result = %v\n", req.LeaderId, req.PrevIndex, req.PrevTerm, appendRes)
 
-	return appendRes, r.currentTerm
+	return &rpc.AppendEntriesResponse{Result: appendRes, Term: r.currentTerm}
 }
 
-// A message sent by a follower back to the Raft leader to indicate
-// success/failure of an earlier AppendEntries message. A failure tells the
-// leader to retry the AppendEntries with earlier log entries.
-func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, term Term, nodeId NodeId, numAppended Index) {
+func (r *RaftState) handleNoteEntryAppendedCast(prevIndex Index, success bool, term Term, nodeId NodeId, numAppended Index) {
 	// If RPC request or response contains term T > currentTerm:
 	// set currentTerm = T, convert to follower (§5.1)
 	if term > r.currentTerm {
@@ -257,8 +323,8 @@ func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, t
 	if success {
 		// • If successful: update nextIndex and matchIndex for
 		// follower (§5.3)
-		log.Printf("Updating match index for nodeid %v, prevIndex = %v, numAppended = %v, matchIndex = %v", nodeId, prevIndex, numAppended, utils.Max(r.matchIndices[nodeId], prevIndex+numAppended))
-		r.matchIndices[nodeId] = utils.Max(r.matchIndices[nodeId], prevIndex+numAppended)
+		log.Printf("Updating match index for nodeid %v, prevIndex = %v, numAppended = %v, matchIndex = %v", nodeId, prevIndex, numAppended, Max(r.matchIndices[nodeId], prevIndex+numAppended))
+		r.matchIndices[nodeId] = Max(r.matchIndices[nodeId], prevIndex+numAppended)
 		r.nextIndices[nodeId] = prevIndex + 1 + numAppended
 		r.leaderUpdateCommitIndex()
 	} else if prevIndex > -1 {
@@ -274,7 +340,7 @@ func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, t
 		// to be replicated, and that'll be fulfilled by the response if this
 		// succeeds.
 		//
-		index := utils.Max(prevIndex, 0)
+		index := Max(prevIndex, 0)
 		var prevTerm Term
 		if index == 0 {
 			prevIndex = -1
@@ -290,7 +356,7 @@ func (r *RaftState) HandleAppendEntriesResponse(prevIndex Index, success bool, t
 		logEntries := r.log.GetEntriesFrom(index)
 
 		r.BroadcastChan <- OutboxMessage{
-			Msg: &raftrpc.AppendEntriesRequest{
+			Msg: &rpc.AppendEntriesRequest{
 				Term:      Term(r.currentTerm),
 				PrevIndex: prevIndex,
 				PrevTerm:  prevTerm,
@@ -321,7 +387,7 @@ func (r *RaftState) leaderUpdateCommitIndex() {
 
 	// The median replicated log index (or the largest one <= that that satisfies
 	// the term constraint) is the N we want.
-	medianIndex := utils.Median(allLastLogIndices)
+	medianIndex := Median(allLastLogIndices)
 	for i := medianIndex; i > r.commitIndex; i-- {
 		if r.log.Entries[i].Term == r.currentTerm {
 			r.commitIndex = i
@@ -345,7 +411,7 @@ func (r *RaftState) updateStateMachine() {
 		resultChan, exists := r.pendingClientReqs[r.lastApplied]
 		if exists {
 			delete(r.pendingClientReqs, r.lastApplied)
-			resultChan <- result
+			resultChan <- &raftrpc.ClientLogAppendResponse{Response: result}
 		}
 		// repeat until lastApplied is caught up
 		r.updateStateMachine()
@@ -354,7 +420,7 @@ func (r *RaftState) updateStateMachine() {
 
 // Temp, remove once we have actual stuff working
 func (r *RaftState) BecomeLeader() {
-	currentState := utils.MustSucceed(r.statem.State(context.Background()))
+	currentState := MustSucceed(r.statem.State(context.Background()))
 	if currentState == stateFollower {
 		r.statem.Fire(triggerElection)
 		r.statem.Fire(winElection)
@@ -362,7 +428,7 @@ func (r *RaftState) BecomeLeader() {
 }
 
 func (r *RaftState) BecomeCandidate() {
-	currentState := utils.MustSucceed(r.statem.State(context.Background()))
+	currentState := MustSucceed(r.statem.State(context.Background()))
 	if currentState == stateFollower {
 		r.statem.Fire(triggerElection)
 	} else if currentState == stateLeader {
@@ -372,20 +438,20 @@ func (r *RaftState) BecomeCandidate() {
 }
 
 func (r *RaftState) IsLeader() bool {
-	return utils.MustSucceed(r.statem.IsInState(stateLeader))
+	return MustSucceed(r.statem.IsInState(stateLeader))
 }
 
 func (r *RaftState) IsFollower() bool {
-	return utils.MustSucceed(r.statem.IsInState(stateFollower))
+	return MustSucceed(r.statem.IsInState(stateFollower))
 }
 
 func (r *RaftState) IsCandidate() bool {
-	return utils.MustSucceed(r.statem.IsInState(stateCandidate))
+	return MustSucceed(r.statem.IsInState(stateCandidate))
 }
 
 // includes uncommited entries
 func (r *RaftState) GetAllEntries() []string {
-	return utils.Map(r.log.Entries, func(le raftlog.LogEntry) string { return le.Item })
+	return Map(r.log.Entries, func(le raftlog.LogEntry) string { return le.Item })
 }
 
 // Expiration of a heartbeat timer on the leader. When received, the leader

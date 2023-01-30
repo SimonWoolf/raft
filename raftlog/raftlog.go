@@ -76,9 +76,6 @@ func (r *RaftLog) AppendEntries(prevIndex Index, prevTerm Term, newEntries []Log
 		r.Entries = append(r.Entries, newEntries[i])
 	}
 
-	// 5. If leaderCommit > commitIndex, set commitIndex =
-	// min(leaderCommit, index of last new entry)
-	// TODO
 	return true
 }
 
