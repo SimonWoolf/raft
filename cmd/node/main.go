@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"raft/conf"
+	"raft/kvserver"
 	"raft/raftrpc"
 	"raft/raftstate"
 	"raft/utils"
@@ -55,7 +56,7 @@ func startNode(myNode conf.Node) *RaftNode {
 	// The actual application, which here is a simple key/value server. We pass
 	// it the state-machine apply channel, and then forget about it. That's the
 	// only point of communication, and it's one-way.
-	applicationStateMachine := // TODO
+	applicationStateMachine := kvserver.NewKvServer()
 
 	raftState := raftstate.NewRaftState(broadcastChannel, applicationStateMachine, otherNodeIds)
 
